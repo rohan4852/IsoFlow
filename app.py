@@ -19,6 +19,19 @@ import pytesseract
 
 import google.generativeai as genai
 
+def main() -> None:
+    # --- START PASSCODE GATE ---
+    st.set_page_config(page_title="AuditBot", layout="wide") 
+    
+    # Hide the main content until they enter the key
+    with st.sidebar:
+        st.header("Login")
+        password = st.text_input("Enter License Key", type="password")
+        
+    if password != "TRIAL-2026":
+        st.warning("🔒 Please enter a valid License Key to access the AuditBot.")
+        st.stop()  
+
 SYSTEM_PROMPT = (
     "You are a Senior IT Compliance Auditor (CISA/CISSP) specializing in SOC2 and ISO 27001 audits. "
     "Your task is to analyze the provided policy document text against an audit question.\n\n"
