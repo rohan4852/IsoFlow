@@ -154,21 +154,34 @@ def choose_model(api_key: str, preferred: str) -> str:
     return "gemini-1.5-flash"
 
 # --- MAIN APPLICATION ---
+# --- REPLACE THE MAIN FUNCTION WITH THIS ---
 
 def main() -> None:
-    # 1. PAGE CONFIG & PASSWORD GATE
-    st.set_page_config(page_title="AuditBot", layout="wide") 
+    # 1. PAGE CONFIG
+    st.set_page_config(page_title="AuditBot", layout="wide")
 
-    with st.sidebar:
-        st.header("Login")
+    # --- PASSWORD GATE (CENTER SCREEN) ---
+    # This puts the login box right in the middle of the page
+    if "auth_status" not in st.session_state:
+        st.session_state.auth_status = False
+
+    if not st.session_state.auth_status:
+        st.title("🔐 AuditBot Login")
+        st.write("This is a restricted pilot tool for ISO 27001 auditing.")
+        
         password = st.text_input("Enter License Key", type="password")
-
-    # If password is wrong, STOP everything here.
-    if password != "TRIAL-2026":
-        st.warning("🔒 Please enter a valid License Key to access the AuditBot.")
+        
+        if st.button("Unlock Access"):
+            if password == "TRIAL-2026":
+                st.session_state.auth_status = True
+                st.rerun()  # Refresh the page to load the tool
+            else:
+                st.error("❌ Incorrect License Key")
+        
+        # Stop the app here if not logged in
         st.stop()
 
-    # 2. LOAD CONFIG
+    # --- MAIN APP (Only loads after unlock) ---
     load_dotenv()
     if (not os.path.exists(".env")) and os.path.exists(".env.example"):
         load_dotenv(".env.example")
@@ -177,6 +190,7 @@ def main() -> None:
 
     # 3. SIDEBAR CONFIG
     with st.sidebar:
+        st.success("✅ Logged In")
         st.markdown("---")
         st.header("Configuration")
         
