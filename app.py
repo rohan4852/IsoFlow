@@ -154,12 +154,19 @@ def choose_model(api_key: str, preferred: str) -> str:
     return "gemini-1.5-flash"
 
 # --- MAIN APPLICATION ---
-# --- REPLACE THE MAIN FUNCTION WITH THIS ---
-
 def main() -> None:
     # 1. PAGE CONFIG
     st.set_page_config(page_title="AuditBot", layout="wide")
-
+    
+    # --- HIDE STREAMLIT BRANDING ---
+    hide_st_style = """
+            <style>
+            #MainMenu {visibility: hidden;}
+            footer {visibility: hidden;}
+            header {visibility: hidden;}
+            </style>
+            """
+    st.markdown(hide_st_style, unsafe_allow_html=True)
     # --- PASSWORD GATE (CENTER SCREEN) ---
     # This puts the login box right in the middle of the page
     if "auth_status" not in st.session_state:

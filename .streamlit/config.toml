@@ -1,0 +1,8 @@
+[client]
+toolbarMode = "viewer" # Hides the "Manage App" and "Deploy" buttons
+
+[viewer]
+hideTopBar = true      # Hides the top decoration bar (if supported)
+
+[ui]
+hideTopBar = true      # Hides the hamburger menu in newer versions
