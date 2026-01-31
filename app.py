@@ -158,15 +158,25 @@ def main() -> None:
     # 1. PAGE CONFIG
     st.set_page_config(page_title="AuditBot", layout="wide")
     
-    # --- HIDE STREAMLIT BRANDING ---
-    hide_st_style = """
-            <style>
-            #MainMenu {visibility: hidden;}
-            footer {visibility: hidden;}
-            header {visibility: hidden;}
-            </style>
-            """
-    st.markdown(hide_st_style, unsafe_allow_html=True)
+    s# --- CSS: Hide Header & Footer, Keep Sidebar ---
+    st.markdown("""
+        <style>
+            /* 1. Hide the top header (Hamburger menu & Red/Orange bar) */
+            [data-testid="stHeader"] {
+                display: none;
+            }
+            
+            /* 2. Hide the "Made with Streamlit" footer */
+            footer {
+                visibility: hidden;
+            }
+            
+            /* 3. OPTIONAL: Remove whitespace at top of page where header was */
+            .block-container {
+                padding-top: 1rem;
+            }
+        </style>
+        """, unsafe_allow_html=True)
     # --- PASSWORD GATE (CENTER SCREEN) ---
     # This puts the login box right in the middle of the page
     if "auth_status" not in st.session_state:
