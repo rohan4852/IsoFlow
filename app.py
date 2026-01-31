@@ -154,31 +154,28 @@ def choose_model(api_key: str, preferred: str) -> str:
     return "gemini-1.5-flash"
 
 # --- MAIN APPLICATION ---
+
 def main() -> None:
     # 1. PAGE CONFIG
     st.set_page_config(page_title="AuditBot", layout="wide")
-    
-    s# --- CSS: Hide Header & Footer, Keep Sidebar ---
+
+    # 2. BRANDING HIDER (MUST BE HERE, BEFORE LOGIN LOGIC)
     st.markdown("""
         <style>
-            /* 1. Hide the top header (Hamburger menu & Red/Orange bar) */
-            [data-testid="stHeader"] {
-                display: none;
-            }
+            /* Hide the main top header (Hamburger menu & Red/Orange bar) */
+            header {visibility: hidden !important;}
+            [data-testid="stHeader"] {display: none !important;}
             
-            /* 2. Hide the "Made with Streamlit" footer */
-            footer {
-                visibility: hidden;
-            }
+            /* Hide the "Made with Streamlit" footer */
+            footer {visibility: hidden !important;}
+            .stFooter {display: none !important;}
             
-            /* 3. OPTIONAL: Remove whitespace at top of page where header was */
-            .block-container {
-                padding-top: 1rem;
-            }
+            /* Remove top whitespace */
+            .block-container {padding-top: 1rem !important;}
         </style>
         """, unsafe_allow_html=True)
-    # --- PASSWORD GATE (CENTER SCREEN) ---
-    # This puts the login box right in the middle of the page
+
+    # 3. PASSWORD GATE (CENTER SCREEN)
     if "auth_status" not in st.session_state:
         st.session_state.auth_status = False
 
@@ -191,21 +188,21 @@ def main() -> None:
         if st.button("Unlock Access"):
             if password == "TRIAL-2026":
                 st.session_state.auth_status = True
-                st.rerun()  # Refresh the page to load the tool
+                st.rerun()
             else:
                 st.error("❌ Incorrect License Key")
         
         # Stop the app here if not logged in
         st.stop()
 
-    # --- MAIN APP (Only loads after unlock) ---
+    # 4. MAIN APP LOGIC (Only loads after unlock)
     load_dotenv()
     if (not os.path.exists(".env")) and os.path.exists(".env.example"):
         load_dotenv(".env.example")
 
     st.title("AuditBot — Compliance Auditor")
 
-    # 3. SIDEBAR CONFIG
+    # SIDEBAR CONFIG
     with st.sidebar:
         st.success("✅ Logged In")
         st.markdown("---")
@@ -243,7 +240,7 @@ def main() -> None:
     if tessdata_prefix: os.environ["TESSDATA_PREFIX"] = tessdata_prefix
     if tesseract_cmd: pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
 
-    # 4. MAIN INTERFACE
+    # MAIN INTERFACE
     question = st.text_input("Audit question", value="What are the benefits for the Development Bank of Japan?")
     files = st.file_uploader("Upload PDF files", type=["pdf"], accept_multiple_files=True)
 
