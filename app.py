@@ -186,7 +186,7 @@ def main() -> None:
         password = st.text_input("Enter License Key", type="password")
         
         if st.button("Unlock Access"):
-            if password == "TRIAL-2026":
+            if password == st.secrets["ACCESS_KEY"]:
                 st.session_state.auth_status = True
                 st.rerun()
             else:
