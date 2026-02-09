@@ -157,51 +157,45 @@ def choose_model(api_key: str, preferred: str) -> str:
 
 def main() -> None:
     # 1. PAGE CONFIG
-    st.set_page_config(page_title="AuditBot", layout="wide")
+    st.set_page_config(page_title="IsoFlow AI", layout="wide")
 
-    # 2. BRANDING HIDER (MUST BE HERE, BEFORE LOGIN LOGIC)
+    # 2. BRANDING HIDER
     st.markdown("""
         <style>
-            /* Hide the main top header (Hamburger menu & Red/Orange bar) */
             header {visibility: hidden !important;}
             [data-testid="stHeader"] {display: none !important;}
-            
-            /* Hide the "Made with Streamlit" footer */
             footer {visibility: hidden !important;}
             .stFooter {display: none !important;}
-            
-            /* Remove top whitespace */
             .block-container {padding-top: 1rem !important;}
         </style>
         """, unsafe_allow_html=True)
 
-    # 3. PASSWORD GATE (CENTER SCREEN)
+    # 3. PASSWORD GATE
     if "auth_status" not in st.session_state:
         st.session_state.auth_status = False
 
     if not st.session_state.auth_status:
-        st.title("🔐 AuditBot Login")
-        st.write("This is a restricted pilot tool for ISO 27001 auditing.")
+        st.title("🔐 IsoFlow AI - Pilot Access")
+        st.write("Please enter your Pilot License Key to continue.")
         
-        password = st.text_input("Enter License Key", type="password")
+        password = st.text_input("License Key", type="password")
         
         if st.button("Unlock Access"):
-            # You can change this key later
+            # Check against Streamlit Secrets
             if password == st.secrets["ACCESS_KEY"]:
                 st.session_state.auth_status = True
                 st.rerun()
             else:
                 st.error("❌ Incorrect License Key")
         
-        # Stop the app here if not logged in
         st.stop()
 
-    # 4. MAIN APP LOGIC (Only loads after unlock)
+    # 4. MAIN APP LOGIC
     load_dotenv()
     if (not os.path.exists(".env")) and os.path.exists(".env.example"):
         load_dotenv(".env.example")
 
-    st.title("AuditBot — Compliance Auditor")
+    st.title("IsoFlow AI — Automated Auditor")
 
     # SIDEBAR CONFIG
     with st.sidebar:
@@ -216,17 +210,18 @@ def main() -> None:
             "API Key",
             type="password",
             placeholder=placeholder_text,
-            help="If you leave this empty, the app uses the secure system key."
+            help="Your key is processed securely and never stored."
         )
         api_key = user_key if user_key else secret_key
 
+        # Set default to Auto (Index 2) to reduce user error
         model_choice = st.selectbox(
             "Model",
             options=["gemini-1.5-flash", "gemini-pro", "Auto (list models)"],
-            index=0,
+            index=2,
         )
 
-        st.subheader("OCR (fallback)")
+        st.subheader("OCR Settings")
         ocr_threshold_chars = st.number_input(
             "OCR fallback threshold (chars)",
             min_value=0, max_value=10000, value=50, step=10
@@ -242,42 +237,27 @@ def main() -> None:
     if tesseract_cmd: pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
 
     # MAIN INTERFACE
-    question = st.text_input("Audit question", value="What are the benefits for the Development Bank of Japan?")
-    files = st.file_uploader("Upload PDF files", type=["pdf"], accept_multiple_files=True)
+    st.info("💡 **Tip:** Drag in your policy PDF and ask a specific audit question (e.g., 'Does this policy require password rotation?').")
+    
+    question = st.text_input("Audit Question / Control to Verify", value="Does this document satisfy Control A.5.17 (Authentication)?")
+    files = st.file_uploader("Upload Evidence (PDF)", type=["pdf"], accept_multiple_files=True)
 
-    run = st.button("Run Audit", type="primary", disabled=not (files and question.strip()))
+    run = st.button("Run Analysis", type="primary", disabled=not (files and question.strip()))
 
     if not run:
-        st.caption("Tip: For scanned PDFs, ensure Tesseract + Poppler are installed.")
         return
 
-    # --- DEMO HACK: If we are recording the video, we simulate the output ---
-    # We check if a file is uploaded to trigger the visual, but we don't need the API key to be valid for the demo.
-    
+    if not api_key or not api_key.strip():
+        st.error("⚠️ Please enter your Gemini API Key in the sidebar to proceed.")
+        return
+
+    chosen_model = choose_model(api_key, model_choice)
     rows: List[AuditRow] = []
     progress = st.progress(0)
 
     for i, f in enumerate(files):
         progress.progress((i) / max(len(files), 1))
         
-        # --- START HARDCODED DEMO SECTION ---
-        # If the file matches our demo file, we force the "Perfect" result immediately.
-        if "password" in f.name.lower():
-            # 1. VISUAL: The "Instant" Match as requested in the script
-            st.success("✅ **MATCH FOUND:** ISO 27001:2022 - Control A.5.17 (Authentication Information)")
-            st.info("Analysis: Document defines rotation frequency (90 days) and complexity requirements. Compliant.")
-            
-            # 2. DATA: Populate the row so the table below (if visible) also looks correct
-            rows.append(AuditRow(
-                filename=f.name,
-                audit_finding="Compliant - Control A.5.17 Met",
-                evidence="System-level passwords... changed on at least a quarterly basis."
-            ))
-            # Skip the real processing
-            continue 
-        # --- END HARDCODED DEMO SECTION ---
-
-        # Real processing for other files
         try:
             pdf_bytes = f.getvalue()
             doc_text, used_ocr = extract_pdf_text(
@@ -290,37 +270,37 @@ def main() -> None:
             )
 
             if not doc_text:
-                raise RuntimeError("No text could be extracted.")
+                raise RuntimeError("No text could be extracted. The PDF might be empty or encrypted.")
             
-            # Only call API if we have a key (prevents crash if you just want to test UI)
-            if api_key:
-                result = ask_gemini(
-                    api_key=api_key,
-                    model_name=choose_model(api_key, model_choice),
-                    document_text=doc_text,
-                    question=question.strip(),
-                )
-                result.filename = f.name
-                rows.append(result)
-            else:
-                rows.append(AuditRow(filename=f.name, audit_finding="NO API KEY", evidence="Please enter API key."))
+            # CALL REAL AI
+            result = ask_gemini(
+                api_key=api_key,
+                model_name=chosen_model,
+                document_text=doc_text,
+                question=question.strip(),
+            )
+            result.filename = f.name
+            rows.append(result)
 
         except Exception as e:
             rows.append(AuditRow(filename=f.name, audit_finding="ERROR", evidence=_safe_str(e)))
 
     progress.progress(1.0)
 
-    # Show the table below (optional, but good for completeness)
+    # RESULTS DISPLAY
     if rows:
+        st.success("Analysis Complete")
+        
         df = pd.DataFrame([asdict(r) for r in rows])
         df = df.rename(columns={"filename": "Filename", "audit_finding": "Audit Finding", "evidence": "Evidence"})
 
-        st.subheader("Detailed Report")
+        st.subheader("Audit Report")
         st.dataframe(df, use_container_width=True)
+        
         st.download_button(
             "Download Report (CSV)",
             data=df.to_csv(index=False).encode("utf-8"),
-            file_name="audit_report.csv",
+            file_name="isoflow_audit_report.csv",
             mime="text/csv",
         )
 
