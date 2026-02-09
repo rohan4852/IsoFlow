@@ -186,6 +186,7 @@ def main() -> None:
         password = st.text_input("Enter License Key", type="password")
         
         if st.button("Unlock Access"):
+            # You can change this key later
             if password == st.secrets["ACCESS_KEY"]:
                 st.session_state.auth_status = True
                 st.rerun()
@@ -250,16 +251,33 @@ def main() -> None:
         st.caption("Tip: For scanned PDFs, ensure Tesseract + Poppler are installed.")
         return
 
-    if not api_key or not api_key.strip():
-        st.error("Please enter your GEMINI_API_KEY in the sidebar.")
-        return
-
-    chosen_model = choose_model(api_key, model_choice)
+    # --- DEMO HACK: If we are recording the video, we simulate the output ---
+    # We check if a file is uploaded to trigger the visual, but we don't need the API key to be valid for the demo.
+    
     rows: List[AuditRow] = []
     progress = st.progress(0)
 
     for i, f in enumerate(files):
         progress.progress((i) / max(len(files), 1))
+        
+        # --- START HARDCODED DEMO SECTION ---
+        # If the file matches our demo file, we force the "Perfect" result immediately.
+        if "password" in f.name.lower():
+            # 1. VISUAL: The "Instant" Match as requested in the script
+            st.success("✅ **MATCH FOUND:** ISO 27001:2022 - Control A.5.17 (Authentication Information)")
+            st.info("Analysis: Document defines rotation frequency (90 days) and complexity requirements. Compliant.")
+            
+            # 2. DATA: Populate the row so the table below (if visible) also looks correct
+            rows.append(AuditRow(
+                filename=f.name,
+                audit_finding="Compliant - Control A.5.17 Met",
+                evidence="System-level passwords... changed on at least a quarterly basis."
+            ))
+            # Skip the real processing
+            continue 
+        # --- END HARDCODED DEMO SECTION ---
+
+        # Real processing for other files
         try:
             pdf_bytes = f.getvalue()
             doc_text, used_ocr = extract_pdf_text(
@@ -273,32 +291,38 @@ def main() -> None:
 
             if not doc_text:
                 raise RuntimeError("No text could be extracted.")
-
-            result = ask_gemini(
-                api_key=api_key,
-                model_name=chosen_model,
-                document_text=doc_text,
-                question=question.strip(),
-            )
-            result.filename = f.name
-            rows.append(result)
+            
+            # Only call API if we have a key (prevents crash if you just want to test UI)
+            if api_key:
+                result = ask_gemini(
+                    api_key=api_key,
+                    model_name=choose_model(api_key, model_choice),
+                    document_text=doc_text,
+                    question=question.strip(),
+                )
+                result.filename = f.name
+                rows.append(result)
+            else:
+                rows.append(AuditRow(filename=f.name, audit_finding="NO API KEY", evidence="Please enter API key."))
 
         except Exception as e:
             rows.append(AuditRow(filename=f.name, audit_finding="ERROR", evidence=_safe_str(e)))
 
     progress.progress(1.0)
 
-    df = pd.DataFrame([asdict(r) for r in rows])
-    df = df.rename(columns={"filename": "Filename", "audit_finding": "Audit Finding", "evidence": "Evidence"})
+    # Show the table below (optional, but good for completeness)
+    if rows:
+        df = pd.DataFrame([asdict(r) for r in rows])
+        df = df.rename(columns={"filename": "Filename", "audit_finding": "Audit Finding", "evidence": "Evidence"})
 
-    st.subheader("Results")
-    st.dataframe(df, use_container_width=True)
-    st.download_button(
-        "Download Report (CSV)",
-        data=df.to_csv(index=False).encode("utf-8"),
-        file_name="audit_report.csv",
-        mime="text/csv",
-    )
+        st.subheader("Detailed Report")
+        st.dataframe(df, use_container_width=True)
+        st.download_button(
+            "Download Report (CSV)",
+            data=df.to_csv(index=False).encode("utf-8"),
+            file_name="audit_report.csv",
+            mime="text/csv",
+        )
 
 if __name__ == "__main__":
     main()
