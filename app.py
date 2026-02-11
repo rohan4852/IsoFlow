@@ -51,37 +51,35 @@ def extract_text_fast(file_bytes: bytes) -> str:
         return f"Extraction Error: {str(e)}"
 
 def run_worker(api_key: str, file_obj, question: str) -> AuditRow:
-    """Thread worker with Multi-Model Fallback."""
+    """Thread worker with Bulletproof Fallback."""
     try:
         content = extract_text_fast(file_obj.getvalue())
         if not content:
             return AuditRow(file_obj.name, "ERROR", "Could not read file.")
 
-        genai.configure(api_key=api_key)
+        # Force the stable configuration
+        genai.configure(api_key=api_key, transport='rest')
         
-        # --- MULTI-MODEL FALLBACK LOGIC ---
-        # We try the most efficient models in order.
-        model_names = ["models/gemini-1.5-flash", "models/gemini-1.5-pro", "gemini-pro"]
+        # Try the most stable names first
+        model_names = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
         response = None
         last_err = ""
 
         for m_name in model_names:
             try:
                 model = genai.GenerativeModel(model_name=m_name)
-                prompt = f"{SYSTEM_PROMPT}\n\nDocument Context: {content[:100000]}\n\nQuestion: {question}"
+                prompt = f"{SYSTEM_PROMPT}\n\nDocument: {content[:100000]}\n\nQuestion: {question}"
                 response = model.generate_content(prompt)
                 if response:
                     break
             except Exception as e:
                 last_err = str(e)
-                continue # Try the next model in the list
+                continue 
 
         if not response:
-            return AuditRow(file_obj.name, "API ERROR", f"All models failed: {last_err}")
+            return AuditRow(file_obj.name, "API ERROR", f"Last failure: {last_err}")
 
-        # --- SMART JSON PARSING ---
         raw_text = response.text.strip()
-        # Clean markdown code blocks if the AI includes them
         clean_json = re.sub(r"```json|```", "", raw_text).strip()
         
         try:
@@ -92,12 +90,10 @@ def run_worker(api_key: str, file_obj, question: str) -> AuditRow:
                 evidence=parsed.get("evidence", "NOT FOUND")
             )
         except:
-            # Final fallback: if JSON fails, return the raw text as the finding
             return AuditRow(file_obj.name, "Check Required", clean_json[:500])
 
     except Exception as e:
-        return AuditRow(file_obj.name, "CRASHED", str(e)[:150])
-        
+        return AuditRow(file_obj.name, "CRASHED", str(e)[:150])        
 # --- UI LAYER ---
 def main():
     st.set_page_config(page_title="IsoFlow AI", layout="wide")
