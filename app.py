@@ -2,32 +2,22 @@ import io
 import json
 import os
 import re
+import concurrent.futures
 from dataclasses import asdict, dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List
 
 import pandas as pd
 import streamlit as st
-from dotenv import load_dotenv
-from pdf2image import convert_from_bytes
-try:
-    from pypdf import PdfReader
-except ImportError as exc:
-    raise RuntimeError(
-        "Missing dependency 'pypdf'. Install it with: pip install -r requirements.txt"
-    ) from exc
-import pytesseract
 import google.generativeai as genai
+from pdf2image import convert_from_bytes
+from pypdf import PdfReader
+import pytesseract
 
-# --- GLOBAL CONSTANTS & CLASSES ---
-
+# --- CORE SETTINGS ---
 SYSTEM_PROMPT = (
-    "You are a Senior IT Compliance Auditor (CISA/CISSP) specializing in SOC2 and ISO 27001 audits. "
-    "Your task is to analyze the provided policy document text against an audit question.\n\n"
-    "STRICT RULES:\n"
-    "1. FACTUAL STRICTNESS: You must answer ONLY using facts explicitly stated in the provided text. Do not use prior knowledge or assumptions.\n"
-    "2. EVIDENCE QUOTING: The 'evidence' field must be a VERBATIM copy-paste of the sentence from the text that supports your finding. Do not paraphrase.\n"
-    "3. HANDLING GAPS: If the document does not explicitly address the question, the audit_finding must be 'Gaps Observed: Policy does not explicitly state...' and evidence must be 'EVIDENCE NOT FOUND'.\n"
-    "4. TONE: Be direct, objective, and professional. Avoid fluff."
+    "You are a strict ISO 27001 Lead Auditor. Return JSON only. "
+    "Keys: 'audit_finding' (Pass/Fail/Gap), 'evidence' (Verbatim quote). "
+    "If missing, value is 'NOT FOUND'."
 )
 
 @dataclass
@@ -36,273 +26,111 @@ class AuditRow:
     audit_finding: str
     evidence: str
 
-def _safe_str(exc: BaseException) -> str:
-    msg = f"{type(exc).__name__}: {exc}"
-    return msg[:4000]
-
 def _clean_text(text: str) -> str:
     text = text.replace("\x00", " ")
-    text = re.sub(r"[\t\r ]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
+    return re.sub(r"\s+", " ", text).strip()
 
-@st.cache_data(show_spinner=False)
-def extract_pdf_text(
-    pdf_bytes: bytes,
-    *,
-    filename: str,
-    ocr_threshold_chars: int,
-    ocr_dpi: int,
-    ocr_lang: str,
-    poppler_path: Optional[str],
-) -> Tuple[str, bool]:
-    extracted = ""
+def extract_text_fast(file_bytes: bytes) -> str:
+    """Hybrid: Fast Metadata Extract -> Fallback to Slow OCR."""
+    text = ""
     try:
-        reader = PdfReader(io.BytesIO(pdf_bytes))
-        pages: List[str] = []
+        reader = PdfReader(io.BytesIO(file_bytes))
         for page in reader.pages:
-            t = page.extract_text() or ""
-            t = t.strip()
-            if t:
-                pages.append(t)
-        extracted = "\n\n".join(pages).strip()
-    except Exception:
-        extracted = ""
+            text += page.extract_text() or ""
+    except: pass
+    
+    if len(text.strip()) > 100:
+        return _clean_text(text)
 
-    if len(extracted) >= ocr_threshold_chars:
-        return _clean_text(extracted), False
-
-    ocr_text = ocr_pdf_text(
-        pdf_bytes,
-        dpi=ocr_dpi,
-        lang=ocr_lang,
-        poppler_path=poppler_path,
-    )
-    ocr_text = (ocr_text or "").strip()
-    if ocr_text:
-        return _clean_text(ocr_text), True
-
-    return _clean_text(extracted), True
-
-@st.cache_data(show_spinner=False)
-def ocr_pdf_text(
-    pdf_bytes: bytes,
-    *,
-    dpi: int,
-    lang: str,
-    poppler_path: Optional[str],
-) -> str:
-    images = convert_from_bytes(
-        pdf_bytes,
-        dpi=dpi,
-        fmt="png",
-        poppler_path=poppler_path or None,
-    )
-    parts: List[str] = []
-    for img in images:
-        parts.append(pytesseract.image_to_string(img, lang=lang) or "")
-    return "\n".join(parts)
-
-def ask_gemini(*, api_key: str, model_name: str, document_text: str, question: str) -> AuditRow:
-    genai.configure(api_key=api_key)
-
-    if model_name.startswith("models/"):
-        model_name = model_name[len("models/") :]
-
-    model = genai.GenerativeModel(
-        model_name=model_name,
-        system_instruction=SYSTEM_PROMPT,
-        generation_config={"response_mime_type": "application/json"}
-    )
-
-    user_prompt = (
-        f"DOCUMENT CONTENT:\n{document_text}\n\n"
-        f"AUDIT QUESTION:\n{question}\n\n"
-        "INSTRUCTIONS:\n"
-        "Analyze the document and return a JSON object with exactly two keys:\n"
-        "1. \"audit_finding\": A summary of whether the control is met, partially met, or missing.\n"
-        "2. \"evidence\": The exact sentence from the text proving the finding.\n"
-        "If evidence is missing, set \"evidence\" to 'EVIDENCE NOT FOUND'."
-    )
-
+    # Fallback to OCR if PDF is a scanned image
     try:
-        resp = model.generate_content(user_prompt)
-        parsed = json.loads(resp.text)
+        images = convert_from_bytes(file_bytes, dpi=200, fmt='jpeg') # JPEG + 200DPI = Speed
+        ocr_parts = [pytesseract.image_to_string(img) for img in images]
+        return _clean_text(" ".join(ocr_parts))
+    except Exception as e:
+        return f"Extraction Error: {str(e)}"
+
+def run_worker(api_key: str, file_obj, question: str) -> AuditRow:
+    """Thread worker for parallel processing."""
+    try:
+        content = extract_text_fast(file_obj.getvalue())
+        if not content:
+            return AuditRow(file_obj.name, "ERROR", "Could not read file.")
+
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(
+            model_name="gemini-1.5-flash",
+            system_instruction=SYSTEM_PROMPT,
+            generation_config={"response_mime_type": "application/json"}
+        )
+
+        prompt = f"Context: {content[:150000]}\n\nQuestion: {question}"
+        response = model.generate_content(prompt)
+        parsed = json.loads(response.text)
+        
         return AuditRow(
-            filename="", 
-            audit_finding=parsed.get("audit_finding", "Error parsing finding"), 
-            evidence=parsed.get("evidence", "EVIDENCE NOT FOUND")
+            filename=file_obj.name,
+            audit_finding=parsed.get("audit_finding", "N/A"),
+            evidence=parsed.get("evidence", "NOT FOUND")
         )
     except Exception as e:
-        return AuditRow(
-            filename="", 
-            audit_finding="AI PROCESSING ERROR", 
-            evidence=_safe_str(e)
-        )
+        return AuditRow(file_obj.name, "CRASHED", str(e)[:100])
 
-def choose_model(api_key: str, preferred: str) -> str:
-    if preferred != "Auto (list models)":
-        return preferred
-    genai.configure(api_key=api_key)
-    try:
-        for m in genai.list_models():
-            methods = getattr(m, "supported_generation_methods", None) or []
-            if "generateContent" in methods:
-                return str(getattr(m, "name", "gemini-1.5-flash"))
-    except Exception:
-        pass
-    return "gemini-1.5-flash"
-
-# --- MAIN APPLICATION ---
-
-def main() -> None:
-    # 1. PAGE CONFIG
+# --- UI LAYER ---
+def main():
     st.set_page_config(page_title="IsoFlow AI", layout="wide")
-
-    # 2. BRANDING HIDER
+    
+    # Force Hacker Dark Theme
     st.markdown("""
         <style>
-            header {visibility: hidden !important;}
-            [data-testid="stHeader"] {display: none !important;}
-            footer {visibility: hidden !important;}
-            .stFooter {display: none !important;}
-            .block-container {padding-top: 1rem !important;}
+            .stApp { background-color: #050505; color: #d4d4d4; }
+            .stTextInput input { background-color: #111 !important; color: #fff !important; border: 1px solid #333 !important; }
+            .stButton>button { background-color: #2563eb !important; width: 100%; border: none !important; }
+            [data-testid="stHeader"], [data-testid="stFooter"] { display: none; }
         </style>
-        """, unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
 
-    # 3. PASSWORD GATE
-    if "auth_status" not in st.session_state:
-        st.session_state.auth_status = False
-
-    if not st.session_state.auth_status:
-        st.title("🔐 IsoFlow AI - Pilot Access")
-        st.write("Please enter your Pilot License Key to continue.")
-        
-        password = st.text_input("License Key", type="password")
-        
-        if st.button("Unlock Access"):
-            # Check against Streamlit Secrets
-            if password == st.secrets["ACCESS_KEY"]:
-                st.session_state.auth_status = True
+    if "auth" not in st.session_state: st.session_state.auth = False
+    if not st.session_state.auth:
+        st.title("🔐 IsoFlow Pilot Access")
+        key = st.text_input("License Key", type="password")
+        if st.button("Unlock"):
+            if key == st.secrets.get("ACCESS_KEY", "admin"):
+                st.session_state.auth = True
                 st.rerun()
-            else:
-                st.error("❌ Incorrect License Key")
-        
         st.stop()
 
-    # 4. MAIN APP LOGIC
-    load_dotenv()
-    if (not os.path.exists(".env")) and os.path.exists(".env.example"):
-        load_dotenv(".env.example")
-
-    st.title("IsoFlow AI — Automated Auditor")
-
-    # SIDEBAR CONFIG
-    with st.sidebar:
-        st.success("✅ Logged In")
-        st.markdown("---")
-        st.header("Configuration")
-        
-        secret_key = os.getenv("GEMINI_API_KEY")
-        placeholder_text = "✅ Key loaded from Secrets" if secret_key else "Enter GEMINI_API_KEY"
-        
-        user_key = st.text_input(
-            "API Key",
-            type="password",
-            placeholder=placeholder_text,
-            help="Your key is processed securely and never stored."
-        )
-        api_key = user_key if user_key else secret_key
-
-        # Set default to Auto (Index 2) to reduce user error
-        model_choice = st.selectbox(
-            "Model",
-            options=["gemini-1.5-flash", "gemini-pro", "Auto (list models)"],
-            index=2,
-        )
-
-        st.subheader("OCR Settings")
-        ocr_threshold_chars = st.number_input(
-            "OCR fallback threshold (chars)",
-            min_value=0, max_value=10000, value=50, step=10
-        )
-        ocr_dpi = st.number_input("OCR DPI", min_value=100, max_value=600, value=300, step=50)
-        ocr_lang = st.text_input("Tesseract language", value="eng")
-
-        tessdata_prefix = st.text_input("TESSDATA_PREFIX", value=os.getenv("TESSDATA_PREFIX", ""))
-        tesseract_cmd = st.text_input("Tesseract path", value=os.getenv("TESSERACT_CMD", ""))
-        poppler_path = st.text_input("Poppler path", value=os.getenv("POPPLER_PATH", ""))
-
-    if tessdata_prefix: os.environ["TESSDATA_PREFIX"] = tessdata_prefix
-    if tesseract_cmd: pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
-
-    # MAIN INTERFACE
-    st.info("💡 **Tip:** Drag in your policy PDF and ask a specific audit question (e.g., 'Does this policy require password rotation?').")
+    st.title("IsoFlow // Turbo Auditor")
     
-    question = st.text_input("Audit Question / Control to Verify", value="Does this document satisfy Control A.5.17 (Authentication)?")
-    files = st.file_uploader("Upload Evidence (PDF)", type=["pdf"], accept_multiple_files=True)
+    with st.sidebar:
+        st.header("⚡ Core")
+        api_key = st.text_input("Gemini Key", type="password", value=st.secrets.get("GEMINI_API_KEY", ""))
+        st.info("Mode: Parallel Multi-Threaded")
 
-    run = st.button("Run Analysis", type="primary", disabled=not (files and question.strip()))
+    question = st.text_input("Audit Question", value="Verify MFA requirements in this policy.")
+    files = st.file_uploader("Upload Evidence", accept_multiple_files=True, type=['pdf'])
 
-    if not run:
-        return
+    if st.button("Run Instant Analysis", type="primary") and files:
+        if not api_key: 
+            st.error("API Key missing.")
+            return
 
-    if not api_key or not api_key.strip():
-        st.error("⚠️ Please enter your Gemini API Key in the sidebar to proceed.")
-        return
+        results = []
+        progress = st.progress(0)
+        status = st.empty()
 
-    chosen_model = choose_model(api_key, model_choice)
-    rows: List[AuditRow] = []
-    progress = st.progress(0)
+        # THE TURBO PART: Process 5 files at a time instead of 1
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            futures = {executor.submit(run_worker, api_key, f, question): f for f in files}
+            for i, future in enumerate(concurrent.futures.as_completed(futures)):
+                res = future.result()
+                results.append(res)
+                progress.progress((i + 1) / len(files))
+                status.text(f"Processed: {res.filename}")
 
-    for i, f in enumerate(files):
-        progress.progress((i) / max(len(files), 1))
-        
-        try:
-            pdf_bytes = f.getvalue()
-            doc_text, used_ocr = extract_pdf_text(
-                pdf_bytes,
-                filename=f.name,
-                ocr_threshold_chars=int(ocr_threshold_chars),
-                ocr_dpi=int(ocr_dpi),
-                ocr_lang=ocr_lang.strip() or "eng",
-                poppler_path=poppler_path.strip() or None,
-            )
-
-            if not doc_text:
-                raise RuntimeError("No text could be extracted. The PDF might be empty or encrypted.")
-            
-            # CALL REAL AI
-            result = ask_gemini(
-                api_key=api_key,
-                model_name=chosen_model,
-                document_text=doc_text,
-                question=question.strip(),
-            )
-            result.filename = f.name
-            rows.append(result)
-
-        except Exception as e:
-            rows.append(AuditRow(filename=f.name, audit_finding="ERROR", evidence=_safe_str(e)))
-
-    progress.progress(1.0)
-
-    # RESULTS DISPLAY
-    if rows:
-        st.success("Analysis Complete")
-        
-        df = pd.DataFrame([asdict(r) for r in rows])
-        df = df.rename(columns={"filename": "Filename", "audit_finding": "Audit Finding", "evidence": "Evidence"})
-
-        st.subheader("Audit Report")
-        st.dataframe(df, use_container_width=True)
-        
-        st.download_button(
-            "Download Report (CSV)",
-            data=df.to_csv(index=False).encode("utf-8"),
-            file_name="isoflow_audit_report.csv",
-            mime="text/csv",
-        )
+        df = pd.DataFrame([asdict(r) for r in results])
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.download_button("Download Report", df.to_csv(index=False), "report.csv", "text/csv")
 
 if __name__ == "__main__":
     main()
