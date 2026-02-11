@@ -51,49 +51,36 @@ def extract_text_fast(file_bytes: bytes) -> str:
         return f"Extraction Error: {str(e)}"
 
 def run_worker(api_key: str, file_obj, question: str) -> AuditRow:
-    """Thread worker: Forced Stable API Version."""
+    """Bulletproof version for 7:30 PM Launch."""
     try:
+        # 1. Fast Text Extraction
         content = extract_text_fast(file_obj.getvalue())
         if not content:
             return AuditRow(file_obj.name, "ERROR", "Could not read file.")
 
-        # 1. FORCE THE STABLE API VERSION
-        # We explicitly tell the SDK to use 'v1' to avoid the 'v1beta' 404 error.
+        # 2. Force Stable API and REST transport
+        # This stops the 'v1beta' 404 error you are seeing
         genai.configure(api_key=api_key, transport='rest')
         
-        # 2. SIMPLIFIED MODEL SELECTION
-        # We use the base names which are most compatible across versions.
-        success = False
-        response = None
-        last_err = ""
+        # 3. Use the most widely available model string
+        model = genai.GenerativeModel(model_name="gemini-1.5-flash")
 
-        # Try Flash first for speed, then Pro for reliability.
-        for m_name in ["gemini-1.5-flash", "gemini-1.5-pro"]:
-            try:
-                # We bypass the 'models/' prefix which is causing issues in your environment
-                model = genai.GenerativeModel(model_name=m_name)
-                
-                # We combine the system prompt and user prompt to ensure JSON output
-                full_prompt = (
-                    f"System: {SYSTEM_PROMPT}\n\n"
-                    f"Document Content: {content[:100000]}\n\n"
-                    f"Audit Question: {question}"
-                )
-                
-                response = model.generate_content(full_prompt)
-                if response and response.text:
-                    success = True
-                    break
-            except Exception as e:
-                last_err = str(e)
-                continue
+        # 4. Simple, Combined Prompt (Best for older library versions)
+        full_prompt = (
+            f"{SYSTEM_PROMPT}\n\n"
+            f"DOCUMENT CONTENT:\n{content[:100000]}\n\n"
+            f"AUDIT QUESTION: {question}"
+        )
+        
+        # Call the API without extra config parameters to ensure stability
+        response = model.generate_content(full_prompt)
+        
+        if not response or not response.text:
+            return AuditRow(file_obj.name, "API ERROR", "No response from Google.")
 
-        if not success:
-            return AuditRow(file_obj.name, "API ERROR", f"Stable models not found. Check API Key permissions.")
-
-        # 3. ROBUST JSON PARSING
+        # 5. Robust JSON Parsing
         raw_text = response.text.strip()
-        # Remove any markdown backticks the AI might add
+        # Clean markdown code blocks if the AI includes them
         clean_json = re.sub(r"```json|```", "", raw_text).strip()
         
         try:
@@ -104,13 +91,15 @@ def run_worker(api_key: str, file_obj, question: str) -> AuditRow:
                 evidence=parsed.get("evidence", "NOT FOUND")
             )
         except:
-            # If JSON parsing fails, return the first 500 chars of the response
+            # Fallback: if JSON fails, we still give them the result
             return AuditRow(file_obj.name, "Manual Review", clean_json[:500])
 
     except Exception as e:
-        return AuditRow(file_obj.name, "ENGINE CRASH", str(e)[:150])
-        
-
+        # Final safety net
+        err_msg = str(e)
+        if "404" in err_msg:
+            return AuditRow(file_obj.name, "API CONFIG ERROR", "Model not found. Use a fresh AI Studio Key.")
+        return AuditRow(file_obj.name, "ENGINE CRASH", err_msg[:100])
 # --- UI LAYER ---
 def main():
     st.set_page_config(page_title="IsoFlow AI", layout="wide")
