@@ -15,9 +15,9 @@ import pytesseract
 
 # --- CORE SETTINGS ---
 SYSTEM_PROMPT = (
-    "You are a strict ISO 27001 Lead Auditor. Return JSON only. "
-    "Keys: 'audit_finding' (Pass/Fail/Gap), 'evidence' (Verbatim quote). "
-    "If missing, value is 'NOT FOUND'."
+    "You are a strict ISO 27001 Lead Auditor. Analyze the provided text. "
+    "Respond ONLY in valid JSON format with keys: 'audit_finding' and 'evidence'. "
+    "Do not include any markdown formatting or extra text."
 )
 
 @dataclass
@@ -51,31 +51,53 @@ def extract_text_fast(file_bytes: bytes) -> str:
         return f"Extraction Error: {str(e)}"
 
 def run_worker(api_key: str, file_obj, question: str) -> AuditRow:
-    """Thread worker for parallel processing."""
+    """Thread worker with Multi-Model Fallback."""
     try:
         content = extract_text_fast(file_obj.getvalue())
         if not content:
             return AuditRow(file_obj.name, "ERROR", "Could not read file.")
 
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
-            system_instruction=SYSTEM_PROMPT,
-            generation_config={"response_mime_type": "application/json"}
-        )
-
-        prompt = f"Context: {content[:150000]}\n\nQuestion: {question}"
-        response = model.generate_content(prompt)
-        parsed = json.loads(response.text)
         
-        return AuditRow(
-            filename=file_obj.name,
-            audit_finding=parsed.get("audit_finding", "N/A"),
-            evidence=parsed.get("evidence", "NOT FOUND")
-        )
-    except Exception as e:
-        return AuditRow(file_obj.name, "CRASHED", str(e)[:100])
+        # --- MULTI-MODEL FALLBACK LOGIC ---
+        # We try the most efficient models in order.
+        model_names = ["models/gemini-1.5-flash", "models/gemini-1.5-pro", "gemini-pro"]
+        response = None
+        last_err = ""
 
+        for m_name in model_names:
+            try:
+                model = genai.GenerativeModel(model_name=m_name)
+                prompt = f"{SYSTEM_PROMPT}\n\nDocument Context: {content[:100000]}\n\nQuestion: {question}"
+                response = model.generate_content(prompt)
+                if response:
+                    break
+            except Exception as e:
+                last_err = str(e)
+                continue # Try the next model in the list
+
+        if not response:
+            return AuditRow(file_obj.name, "API ERROR", f"All models failed: {last_err}")
+
+        # --- SMART JSON PARSING ---
+        raw_text = response.text.strip()
+        # Clean markdown code blocks if the AI includes them
+        clean_json = re.sub(r"```json|```", "", raw_text).strip()
+        
+        try:
+            parsed = json.loads(clean_json)
+            return AuditRow(
+                filename=file_obj.name,
+                audit_finding=parsed.get("audit_finding", "N/A"),
+                evidence=parsed.get("evidence", "NOT FOUND")
+            )
+        except:
+            # Final fallback: if JSON fails, return the raw text as the finding
+            return AuditRow(file_obj.name, "Check Required", clean_json[:500])
+
+    except Exception as e:
+        return AuditRow(file_obj.name, "CRASHED", str(e)[:150])
+        
 # --- UI LAYER ---
 def main():
     st.set_page_config(page_title="IsoFlow AI", layout="wide")
