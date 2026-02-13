@@ -178,12 +178,12 @@ ocr_dpi = 200
 ocr_lang = "eng"
 poppler_path = None
         
-    # MAIN INTERFACE
-    st.info("💡 Upload your policy PDFs below. IsoFlow will automatically discover and map internal controls to ISO 27001:2022 Annex A.")
-    files = st.file_uploader("Upload Evidence (PDF)", type=["pdf"], accept_multiple_files=True)
+# MAIN INTERFACE
+st.info("💡 Upload your policy PDFs below. IsoFlow will automatically discover and map internal controls to ISO 27001:2022 Annex A.")
+files = st.file_uploader("Upload Evidence (PDF)", type=["pdf"], accept_multiple_files=True)
 
-    # Note: 'question' is no longer needed for dynamic mapping, so we use a generic check
-    run = st.button("Run Automated Mapping", type="primary", disabled=not files)
+# Note: 'question' is no longer needed for dynamic mapping, so we use a generic check
+run = st.button("Run Automated Mapping", type="primary", disabled=not files)
 
     if not run:
         return
