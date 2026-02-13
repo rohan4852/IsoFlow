@@ -23,9 +23,11 @@ except ImportError as exc:
 # --- GLOBAL CONSTANTS & CLASSES ---
 
 SYSTEM_PROMPT = (
-    "You are an ISO 27001 Auditor. Scan the text for ONLY these 3 controls: "
+    "You are an ISO 27001 Auditor. Your ONLY goal is to find verbatim quotes for: "
     "A.5.17 (Auth), A.8.10 (Deletion), and A.5.1 (Policy). "
-    "Do not analyze other controls. Return JSON list immediately."
+    "If the text is there, you MUST find it. Do not skip. "
+    "Return JSON: [{'control_id': '...', 'finding': '...', 'evidence': '...'}]"
+)
 )
 
 @dataclass
@@ -95,7 +97,10 @@ def ask_gemini_mapper(*, api_key: str, model_name: str, document_text: str) -> L
     model = genai.GenerativeModel(
         model_name="gemini-3-flash-preview", 
         system_instruction=SYSTEM_PROMPT,
-        generation_config={"response_mime_type": "application/json"}
+        generation_config={
+            "response_mime_type": "application/json",
+            "temperature": 0.0, # Forces literal extraction
+        }
     )
 
     user_prompt = f"Analyze this document and map all internal controls found to ISO 27001:2022 Annex A:\n\n{document_text}"
