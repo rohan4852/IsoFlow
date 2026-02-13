@@ -94,8 +94,10 @@ def extract_pdf_text(
 
 def ask_gemini_mapper(*, api_key: str, model_name: str, document_text: str) -> List[AuditRow]:
     genai.configure(api_key=api_key)
+    
+    # 2026 STABLE MODEL
     model = genai.GenerativeModel(
-        model_name=model_name,
+        model_name="gemini-3-flash-preview", 
         system_instruction=SYSTEM_PROMPT,
         generation_config={"response_mime_type": "application/json"}
     )
@@ -190,7 +192,7 @@ def main() -> None:
         st.error("⚠️ Gemini API Key not found in secrets.")
         return
 
-    chosen_model = choose_model(api_key, model_choice)
+    chosen_model = "gemini-3-flash-preview"
     all_rows: List[AuditRow] = []
     progress = st.progress(0)
 
