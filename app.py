@@ -9,10 +9,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import streamlit as st
 from dotenv import load_dotenv
-from pdf2image import convert_from_bytes
+from pdf2image import convert_from_bytes                            
 import pytesseract
 import google.generativeai as genai
-
+                                    
 # Try importing pypdf, show error if missing
 try:
     from pypdf import PdfReader
@@ -253,12 +253,12 @@ poppler_path = None
         st.subheader("ISO 27001:2022 Annex A Mapping Report")
         st.dataframe(df, use_container_width=True)
         
-        csv = df.to_csv(index=False).encode('utf-8')
+        csv = df.to_csv(index=False).encode('utf-8')                                    
         st.download_button("Download Mapping CSV", csv, "iso_annex_a_report.csv", "text/csv")
 
         all_rows.clear() # Clear the list of results
         gc.collect()
-
+    
         st.markdown("---")
         st.caption("🛡️ **Security Note:** IsoFlow uses a stateless architecture. Documents are processed in volatile memory and purged immediately after analysis. No data is stored on our servers.")
 
