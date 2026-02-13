@@ -24,8 +24,8 @@ st.stop()
 
 SYSTEM_PROMPT = (
 "You are an ISO 27001 Auditor. Analyze the text and find evidence for ONLY these 5 controls: "
-    "A.5.17 (Auth), A.8.10 (Data Deletion), A.5.1 (Policies), A.7.2 (Training), A.8.1 (Endpoints). "
-    "Return a JSON list: [{'control_id': '...', 'finding': '...', 'evidence': '...'}]"
+"A.5.17 (Auth), A.8.10 (Data Deletion), A.5.1 (Policies), A.7.2 (Training), A.8.1 (Endpoints). "
+"Return a JSON list: [{'control_id': '...', 'finding': '...', 'evidence': '...'}]"
 )
 
 @dataclass
