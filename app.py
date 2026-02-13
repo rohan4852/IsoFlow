@@ -2,6 +2,7 @@ import io
 import json
 import os
 import re
+import gc
 from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -22,13 +23,13 @@ except ImportError as exc:
 # --- GLOBAL CONSTANTS & CLASSES ---
 
 SYSTEM_PROMPT = (
-    "You are a Senior IT Compliance Auditor (CISA/CISSP) specializing in SOC2 and ISO 27001 audits. "
-    "Your task is to analyze the provided policy document text against an audit question.\n\n"
+"You are a Lead ISO 27001:2022 Auditor. Your task is to perform 'Requirement Discovery' and 'Annex A Mapping'.\n\n"
     "STRICT RULES:\n"
-    "1. FACTUAL STRICTNESS: You must answer ONLY using facts explicitly stated in the provided text. Do not use prior knowledge or assumptions.\n"
-    "2. EVIDENCE QUOTING: The 'evidence' field must be a VERBATIM copy-paste of the sentence from the text that supports your finding. Do not paraphrase.\n"
-    "3. HANDLING GAPS: If the document does not explicitly address the question, the audit_finding must be 'Gaps Observed: Policy does not explicitly state...' and evidence must be 'EVIDENCE NOT FOUND'.\n"
-    "4. TONE: Be direct, objective, and professional. Avoid fluff."
+    "1. DISCOVERY: Scan the text for every security requirement, rule, or internal control mentioned.\n"
+    "2. MAPPING: Map each finding to the most relevant ISO 27001:2022 Annex A Control ID (e.g., A.5.1, A.8.10).\n"
+    "3. EVIDENCE: Quote the EXACT VERBATIM sentence from the document for each finding.\n"
+    "4. FORMAT: You MUST return a JSON LIST of objects exactly like this: "
+    "[{\"control_id\": \"A.X.X\", \"finding\": \"Summary of policy rule\", \"evidence\": \"Verbatim quote\"}]"
 )
 
 @dataclass
@@ -46,8 +47,7 @@ def _clean_text(text: str) -> str:
     text = re.sub(r"[\t\r ]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
-
-@st.cache_data(show_spinner=False)
+    
 def extract_pdf_text(
     pdf_bytes: bytes,
     *,
@@ -92,44 +92,32 @@ def extract_pdf_text(
 
     return _clean_text(extracted), True
 
-def ask_gemini(*, api_key: str, model_name: str, document_text: str, question: str) -> AuditRow:
+def ask_gemini_mapper(*, api_key: str, model_name: str, document_text: str) -> List[AuditRow]:
     genai.configure(api_key=api_key)
-
-    # Clean model name if needed
-    if model_name.startswith("models/"):
-        model_name = model_name[len("models/") :]
-
     model = genai.GenerativeModel(
         model_name=model_name,
         system_instruction=SYSTEM_PROMPT,
         generation_config={"response_mime_type": "application/json"}
     )
 
-    user_prompt = (
-        f"DOCUMENT CONTENT:\n{document_text}\n\n"
-        f"AUDIT QUESTION:\n{question}\n\n"
-        "INSTRUCTIONS:\n"
-        "Analyze the document and return a JSON object with exactly two keys:\n"
-        "1. \"audit_finding\": A summary of whether the control is met, partially met, or missing.\n"
-        "2. \"evidence\": The exact sentence from the text proving the finding.\n"
-        "If evidence is missing, set \"evidence\" to 'EVIDENCE NOT FOUND'."
-    )
+    user_prompt = f"Analyze this document and map all internal controls found to ISO 27001:2022 Annex A:\n\n{document_text}"
 
     try:
         resp = model.generate_content(user_prompt)
-        parsed = json.loads(resp.text)
-        return AuditRow(
-            filename="", 
-            audit_finding=parsed.get("audit_finding", "Error parsing finding"), 
-            evidence=parsed.get("evidence", "EVIDENCE NOT FOUND")
-        )
+        parsed_list = json.loads(resp.text)
+        
+        results = []
+        for item in parsed_list:
+            results.append(AuditRow(
+                filename=item.get("control_id", "Unknown"), 
+                audit_finding=item.get("finding", "No finding"), 
+                evidence=item.get("evidence", "EVIDENCE NOT FOUND")
+            ))
+        return results
     except Exception as e:
-        return AuditRow(
-            filename="", 
-            audit_finding="AI PROCESSING ERROR", 
-            evidence=_safe_str(e)
-        )
+        return [AuditRow(filename="Error", audit_finding="AI Processing Failed", evidence=_safe_str(e))]
 
+    
 def choose_model(api_key: str, preferred: str) -> str:
     if preferred != "Auto (list models)":
         return preferred
@@ -144,7 +132,6 @@ def choose_model(api_key: str, preferred: str) -> str:
     return "gemini-1.5-flash"
 
 # --- MAIN APPLICATION ---
-
 def main() -> None:
     st.set_page_config(page_title="IsoFlow AI", layout="wide")
 
@@ -190,7 +177,6 @@ def main() -> None:
         user_key = st.text_input("API Key", type="password", placeholder=placeholder_text)
         api_key = user_key if user_key else secret_key
 
-        # Restored Selection Dropdown so YOU can choose what works
         model_choice = st.selectbox(
             "Model",
             options=["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro", "Auto (list models)"],
@@ -201,15 +187,14 @@ def main() -> None:
         ocr_threshold_chars = st.number_input("OCR threshold", value=50)
         ocr_dpi = st.number_input("OCR DPI", value=200)
         ocr_lang = st.text_input("Language", value="eng")
-        
-        # Paths are handled by packages.txt on cloud, so we leave these blank defaults
         poppler_path = None
 
     # MAIN INTERFACE
-    question = st.text_input("Audit Question", value="Does this document satisfy Control A.5.17 (Authentication)?")
+    st.info("💡 Upload your policy PDFs below. IsoFlow will automatically discover and map internal controls to ISO 27001:2022 Annex A.")
     files = st.file_uploader("Upload Evidence (PDF)", type=["pdf"], accept_multiple_files=True)
 
-    run = st.button("Run Analysis", type="primary", disabled=not (files and question.strip()))
+    # Note: 'question' is no longer needed for dynamic mapping, so we use a generic check
+    run = st.button("Run Automated Mapping", type="primary", disabled=not files)
 
     if not run:
         return
@@ -219,15 +204,16 @@ def main() -> None:
         return
 
     chosen_model = choose_model(api_key, model_choice)
-    rows: List[AuditRow] = []
+    all_rows: List[AuditRow] = []
     progress = st.progress(0)
 
-    # ORIGINAL SEQUENTIAL LOOP (Safe & Stable)
+    # START MAPPING LOOP
     for i, f in enumerate(files):
         progress.progress((i) / max(len(files), 1))
         
         try:
             pdf_bytes = f.getvalue()
+            # Ensure you removed @st.cache_data from extract_pdf_text for privacy
             doc_text, used_ocr = extract_pdf_text(
                 pdf_bytes,
                 filename=f.name,
@@ -238,29 +224,54 @@ def main() -> None:
             )
 
             if not doc_text:
-                rows.append(AuditRow(filename=f.name, audit_finding="ERROR", evidence="No text found"))
+                all_rows.append(AuditRow(filename=f.name, audit_finding="ERROR", evidence="No text found"))
                 continue
             
-            result = ask_gemini(
+            st.info(f"🔍 Analyzing {f.name} for ISO controls...")
+            
+            # Use the new dynamic mapping function we defined earlier
+            mappings = ask_gemini_mapper(
                 api_key=api_key,
                 model_name=chosen_model,
-                document_text=doc_text,
-                question=question.strip(),
+                document_text=doc_text
             )
-            result.filename = f.name
-            rows.append(result)
+            
+            for m in mappings:
+                # Add filename to the ID column for the final report
+                m.filename = f"{m.filename} | {f.name}"
+            
+            all_rows.extend(mappings)
+
+            # Cleanup memory
+            del pdf_bytes
+            del doc_text
 
         except Exception as e:
-            rows.append(AuditRow(filename=f.name, audit_finding="ERROR", evidence=_safe_str(e)))
+            all_rows.append(AuditRow(filename=f.name, audit_finding="ERROR", evidence=_safe_str(e)))
 
     progress.progress(1.0)
+    
+    # Final RAM purge
+    import gc
+    gc.collect()
 
-    if rows:
-        st.success("Analysis Complete")
-        df = pd.DataFrame([asdict(r) for r in rows])
-        st.subheader("Audit Report")
+    if all_rows:
+        st.success("✅ Mapping Complete")
+        df = pd.DataFrame([asdict(r) for r in all_rows])
+        # Rename columns for the final display
+        df.columns = ["Control ID | Source File", "Audit Finding / Discovery", "Evidence (Verbatim Quote)"]
+        
+        st.subheader("ISO 27001:2022 Annex A Mapping Report")
         st.dataframe(df, use_container_width=True)
-        st.download_button("Download CSV", df.to_csv(index=False), "report.csv", "text/csv")
+        
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button("Download Mapping CSV", csv, "iso_annex_a_report.csv", "text/csv")
+
+        all_rows.clear() # Clear the list of results
+        gc.collect()
+
+        st.markdown("---")
+        st.caption("🛡️ **Security Note:** IsoFlow uses a stateless architecture. Documents are processed in volatile memory and purged immediately after analysis. No data is stored on our servers.")
 
 if __name__ == "__main__":
     main()
