@@ -29,7 +29,7 @@ SYSTEM_PROMPT = (
 
 @dataclass
 class AuditRow:
-filename: str
+ filename: str
 audit_finding: str
 evidence: str
 
