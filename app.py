@@ -23,13 +23,9 @@ except ImportError as exc:
 # --- GLOBAL CONSTANTS & CLASSES ---
 
 SYSTEM_PROMPT = (
-    "You are a Lead ISO 27001:2022 Auditor. Your task is to perform 'Requirement Discovery' and 'Annex A Mapping'.\n\n"
-    "STRICT RULES:\n"
-    "1. DISCOVERY: Scan the text for every security requirement, rule, or internal control mentioned.\n"
-    "2. MAPPING: Map each finding to the most relevant ISO 27001:2022 Annex A Control ID (e.g., A.5.1, A.8.10).\n"
-    "3. EVIDENCE: Quote the EXACT VERBATIM sentence from the document for each finding.\n"
-    "4. FORMAT: You MUST return a JSON LIST of objects exactly like this: "
-    "[{\"control_id\": \"A.X.X\", \"finding\": \"Summary of policy rule\", \"evidence\": \"Verbatim quote\"}]"
+    "You are an ISO 27001 Auditor. Scan the text for ONLY these 3 controls: "
+    "A.5.17 (Auth), A.8.10 (Deletion), and A.5.1 (Policy). "
+    "Do not analyze other controls. Return JSON list immediately."
 )
 
 @dataclass
