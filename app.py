@@ -28,7 +28,6 @@ SYSTEM_PROMPT = (
     "If the text is there, you MUST find it. Do not skip. "
     "Return JSON: [{'control_id': '...', 'finding': '...', 'evidence': '...'}]"
 )
-)
 
 @dataclass
 class AuditRow:
