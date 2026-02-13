@@ -14,8 +14,7 @@ import pytesseract
 import google.generativeai as genai
                                     
 # Try importing pypdf, show error if missing
-try:
-from pypdf import PdfReader
+try:from pypdf import PdfReader
 except ImportError as exc:
 st.error("Missing dependency 'pypdf'. Please install it.")
 st.stop()
