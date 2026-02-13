@@ -27,7 +27,8 @@ def extract_pdf_text(pdf_bytes, **kwargs) -> Tuple[str, bool]:
     extracted = ""
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes))
-        pages = [p.extract_text() or "" for p in reader.pages]
+        # DEMO SPEED FIX: Only read the first 2 pages
+        pages = [p.extract_text() or "" for p in reader.pages[:2]] 
         extracted = "\n\n".join(pages).strip()
     except:
         pass
