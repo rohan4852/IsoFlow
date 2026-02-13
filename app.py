@@ -159,32 +159,25 @@ def main() -> None:
 
     load_dotenv()
 
-    st.title("IsoFlow AI — Automated Auditor")
+    st.title("IsoFlowAI — Automated Auditor")
 
     # SIDEBAR
     with st.sidebar:
         st.success("✅ Logged In")
         st.markdown("---")
-        st.header("Configuration")
+
+secret_key = st.secrets.get("GEMINI_API_KEY", "")
+api_key = secret_key # Always use the secret key directly
+
+# Set your preferred model by default
+model_choice = "Auto (list models)" 
+
+# Set your standard OCR settings
+ocr_threshold_chars = 50
+ocr_dpi = 200
+ocr_lang = "eng"
+poppler_path = None
         
-        secret_key = st.secrets.get("GEMINI_API_KEY", "")
-        placeholder_text = "✅ Key loaded from Secrets" if secret_key else "Enter GEMINI_API_KEY"
-        
-        user_key = st.text_input("API Key", type="password", placeholder=placeholder_text)
-        api_key = user_key if user_key else secret_key
-
-        model_choice = st.selectbox(
-            "Model",
-            options=["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro", "Auto (list models)"],
-            index=0,
-        )
-
-        st.subheader("OCR Settings")
-        ocr_threshold_chars = st.number_input("OCR threshold", value=50)
-        ocr_dpi = st.number_input("OCR DPI", value=200)
-        ocr_lang = st.text_input("Language", value="eng")
-        poppler_path = None
-
     # MAIN INTERFACE
     st.info("💡 Upload your policy PDFs below. IsoFlow will automatically discover and map internal controls to ISO 27001:2022 Annex A.")
     files = st.file_uploader("Upload Evidence (PDF)", type=["pdf"], accept_multiple_files=True)
