@@ -1,4 +1,4 @@
-import io, json, re, gc, time, concurrent.futures
+import io, json, re, gc, time, random, concurrent.futures
 from dataclasses import asdict, dataclass
 import pandas as pd
 import streamlit as st
@@ -7,12 +7,10 @@ import google.generativeai as genai
 from google.api_core import exceptions
 
 # --- CONFIGURATION ---
-# We define the "High Value" controls here. 
-# These are the ones Consultants check first.
 ISO_CONTROLS = [
     ("A.5.1", "Policies for information security"),
     ("A.6.1.2", "Segregation of duties"),
-    ("A.7.2", "Screening (Background checks)"),
+    ("A.7.2", "Screening"),
     ("A.8.2", "Privileged access rights"),
     ("A.8.10", "Information deletion"),
     ("A.9.1", "Access control policy"),
@@ -60,8 +58,26 @@ def get_working_model_name(api_key):
     except:
         return "models/gemini-pro"
 
+# --- THE FIX: SMART RETRY LOGIC ---
+def ask_with_backoff(model, prompt, retries=3):
+    """
+    If the API blocks us, we wait and try again.
+    """
+    for i in range(retries):
+        try:
+            return model.generate_content(prompt)
+        except Exception as e:
+            if "429" in str(e) or "ResourceExhausted" in str(e):
+                # RATE LIMIT HIT: Wait 5, 10, then 15 seconds
+                wait_time = (i + 1) * 5
+                time.sleep(wait_time)
+                continue
+            else:
+                # If it's a real error (not speed), fail
+                raise e
+    raise Exception("Timed out")
+
 def ask_single_control(model, document_text, cid, cdesc, file_name) -> AuditRow:
-    # Truncate to ensure speed
     truncated_text = document_text[:35000] 
     
     prompt = f"""
@@ -77,7 +93,9 @@ def ask_single_control(model, document_text, cid, cdesc, file_name) -> AuditRow:
     """
     
     try:
-        resp = model.generate_content(prompt)
+        # Use the new Smart Retry function
+        resp = ask_with_backoff(model, prompt)
+        
         text_resp = resp.text.replace("```json", "").replace("```", "")
         if "{" not in text_resp: raise Exception("Invalid JSON")
         
@@ -89,7 +107,7 @@ def ask_single_control(model, document_text, cid, cdesc, file_name) -> AuditRow:
             evidence=data.get("evidence", "No evidence found")
         )
     except Exception as e:
-        return AuditRow(filename=file_name, control_id=cid, audit_finding=f"Error", evidence="Processing Failed")
+        return AuditRow(filename=file_name, control_id=cid, audit_finding="Error", evidence="Processing Failed")
 
 def main():
     st.set_page_config(page_title="IsoFlowAI", layout="wide")
@@ -112,7 +130,6 @@ def main():
                 st.rerun()
         return
 
-    # Auto-Discovery
     if "model_name" not in st.session_state:
         st.session_state.model_name = get_working_model_name(api_key)
     
@@ -132,8 +149,6 @@ def main():
     if st.button("Run Full Audit", type="primary", disabled=not files):
         
         all_rows = []
-        
-        # Calculate Total Steps for Progress Bar
         total_steps = len(files) * len(ISO_CONTROLS)
         current_step = 0
         
@@ -148,21 +163,18 @@ def main():
                 status.error(f"Could not read text from {f.name}")
                 continue
             
-            # NOW ITERATING OVER THE FULL LIST
             for cid, desc in ISO_CONTROLS:
-                # Update visual progress
-                status.write(f"🔍 Checking **{cid}** in {f.name}...")
+                status.write(f"🔍 Checking **{cid}**...")
                 
-                # Run Check
+                # Check control with auto-retry
                 res = ask_single_control(model, doc_text, cid, desc, f.name)
                 all_rows.append(res)
                 
-                # Progress Logic
                 current_step += 1
                 progress_bar.progress(current_step / total_steps)
                 
-                # Safety Sleep (Crucial for stability)
-                time.sleep(0.3) 
+                # BASE DELAY: Wait 1 second between requests to be safe
+                time.sleep(1.0) 
 
         status.update(label="✅ Audit Complete!", state="complete", expanded=False)
         progress_bar.empty()
@@ -184,12 +196,7 @@ def main():
             )
             
             csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                "📥 Download Report (CSV)",
-                csv,
-                "isoflow_audit_report.csv",
-                "text/csv"
-            )
+            st.download_button("Download Report (CSV)", csv, "report.csv", "text/csv")
 
 if __name__ == "__main__":
     main()
