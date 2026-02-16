@@ -6,7 +6,24 @@ from pypdf import PdfReader
 import google.generativeai as genai
 from google.api_core import exceptions
 
-# --- AUTO-DISCOVERY SETUP ---
+# --- CONFIGURATION ---
+# We define the "High Value" controls here. 
+# These are the ones Consultants check first.
+ISO_CONTROLS = [
+    ("A.5.1", "Policies for information security"),
+    ("A.6.1.2", "Segregation of duties"),
+    ("A.7.2", "Screening (Background checks)"),
+    ("A.8.2", "Privileged access rights"),
+    ("A.8.10", "Information deletion"),
+    ("A.9.1", "Access control policy"),
+    ("A.10.1", "Cryptography policy"),
+    ("A.11.1.1", "Physical security perimeter"),
+    ("A.12.1", "Documented operating procedures"),
+    ("A.13.1", "Network security management"),
+    ("A.14.2.1", "Secure development policy"),
+    ("A.15.2", "Supplier service delivery management")
+]
+
 @dataclass
 class AuditRow:
     filename: str
@@ -24,7 +41,6 @@ def extract_pdf_text(pdf_bytes) -> str:
     extracted = ""
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes))
-        # Reads ALL pages (No limit)
         pages = [p.extract_text() or "" for p in reader.pages]
         extracted = "\n\n".join(pages).strip()
     except:
@@ -32,27 +48,21 @@ def extract_pdf_text(pdf_bytes) -> str:
     return _clean_text(extracted)
 
 def get_working_model_name(api_key):
-    """
-    CRITICAL FIX: Automatically finds a valid model for this API Key.
-    """
     genai.configure(api_key=api_key)
     try:
-        # List all models available to your key
         for m in genai.list_models():
             if 'generateContent' in m.supported_generation_methods:
                 name = m.name
-                # Prefer Flash if available, otherwise Pro
                 if 'flash' in name.lower(): return name
                 if 'gemini-1.5-pro' in name.lower(): return name
-                if 'gemini-1.0-pro' in name.lower(): return name
                 if 'gemini-pro' in name.lower(): return name
-        return "models/gemini-pro" # Fallback
+        return "models/gemini-pro"
     except:
-        return "models/gemini-pro" # Fallback
+        return "models/gemini-pro"
 
 def ask_single_control(model, document_text, cid, cdesc, file_name) -> AuditRow:
-    # Truncate text to be safe
-    truncated_text = document_text[:30000] 
+    # Truncate to ensure speed
+    truncated_text = document_text[:35000] 
     
     prompt = f"""
     You are an ISO 27001 Auditor.
@@ -67,7 +77,6 @@ def ask_single_control(model, document_text, cid, cdesc, file_name) -> AuditRow:
     """
     
     try:
-        # Retry logic inside
         resp = model.generate_content(prompt)
         text_resp = resp.text.replace("```json", "").replace("```", "")
         if "{" not in text_resp: raise Exception("Invalid JSON")
@@ -80,7 +89,7 @@ def ask_single_control(model, document_text, cid, cdesc, file_name) -> AuditRow:
             evidence=data.get("evidence", "No evidence found")
         )
     except Exception as e:
-        return AuditRow(filename=file_name, control_id=cid, audit_finding=f"Error: {str(e)[:40]}", evidence="Failed")
+        return AuditRow(filename=file_name, control_id=cid, audit_finding=f"Error", evidence="Processing Failed")
 
 def main():
     st.set_page_config(page_title="IsoFlow AI", layout="wide")
@@ -103,8 +112,7 @@ def main():
                 st.rerun()
         return
 
-    # --- AUTO-CONFIGURE MODEL ---
-    # We find the model name BEFORE the UI loads to prevent crashes
+    # Auto-Discovery
     if "model_name" not in st.session_state:
         st.session_state.model_name = get_working_model_name(api_key)
     
@@ -121,16 +129,16 @@ def main():
 
     files = st.file_uploader("Upload Evidence (PDF)", type=["pdf"], accept_multiple_files=True)
     
-    if st.button("Run Automated Mapping", type="primary", disabled=not files):
+    if st.button("Run Full Audit", type="primary", disabled=not files):
         
         all_rows = []
-        demo_controls = [
-            ("A.5.1", "Policies for Information Security"),
-            ("A.8.2", "Privileged Access Rights"),
-            ("A.12.1", "Operational Procedures"),
-        ]
         
-        status = st.status("🚀 Initializing Audit...", expanded=True)
+        # Calculate Total Steps for Progress Bar
+        total_steps = len(files) * len(ISO_CONTROLS)
+        current_step = 0
+        
+        status = st.status("🚀 Initializing Full Audit...", expanded=True)
+        progress_bar = st.progress(0)
         
         for f in files:
             status.write(f"Reading **{f.name}**...")
@@ -140,20 +148,48 @@ def main():
                 status.error(f"Could not read text from {f.name}")
                 continue
             
-            # SAFE MODE: Sequential processing to avoid Rate Limits with generic models
-            for cid, desc in demo_controls:
-                # Small delay to keep the API happy
-                time.sleep(0.5)
+            # NOW ITERATING OVER THE FULL LIST
+            for cid, desc in ISO_CONTROLS:
+                # Update visual progress
+                status.write(f"🔍 Checking **{cid}** in {f.name}...")
+                
+                # Run Check
                 res = ask_single_control(model, doc_text, cid, desc, f.name)
                 all_rows.append(res)
-                status.write(f"✅ Checked {cid}")
+                
+                # Progress Logic
+                current_step += 1
+                progress_bar.progress(current_step / total_steps)
+                
+                # Safety Sleep (Crucial for stability)
+                time.sleep(0.3) 
 
-        status.update(label="Done!", state="complete", expanded=False)
+        status.update(label="✅ Audit Complete!", state="complete", expanded=False)
+        progress_bar.empty()
         
         if all_rows:
             df = pd.DataFrame([asdict(r) for r in all_rows])
-            st.dataframe(df, use_container_width=True)
-            st.download_button("Download CSV", df.to_csv(index=False), "report.csv")
+            
+            st.subheader("📋 Audit Findings")
+            st.dataframe(
+                df, 
+                column_config={
+                    "control_id": st.column_config.TextColumn("ID", width="small"),
+                    "audit_finding": st.column_config.TextColumn("Status", width="small"),
+                    "evidence": st.column_config.TextColumn("Verbatim Evidence", width="large"),
+                    "filename": st.column_config.TextColumn("File", width="medium"),
+                },
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            csv = df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                "📥 Download Report (CSV)",
+                csv,
+                "isoflow_audit_report.csv",
+                "text/csv"
+            )
 
 if __name__ == "__main__":
     main()
