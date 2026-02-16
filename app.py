@@ -92,7 +92,7 @@ def ask_single_control(model, document_text, cid, cdesc, file_name) -> AuditRow:
         return AuditRow(filename=file_name, control_id=cid, audit_finding=f"Error", evidence="Processing Failed")
 
 def main():
-    st.set_page_config(page_title="IsoFlow AI", layout="wide")
+    st.set_page_config(page_title="IsoFlowAI", layout="wide")
     st.markdown("<style>header {visibility: hidden;} footer {visibility: hidden;}</style>", unsafe_allow_html=True)
 
     if "auth" not in st.session_state: st.session_state.auth = False
@@ -118,7 +118,7 @@ def main():
     
     current_model = st.session_state.model_name
 
-    st.title("IsoFlow AI — Automated Auditor")
+    st.title("IsoFlowAI — Automated Auditor")
     st.caption(f"System Status: Online | Connected to: {current_model}")
     
     genai.configure(api_key=api_key)
