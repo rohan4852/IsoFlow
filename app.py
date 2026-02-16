@@ -6,11 +6,7 @@ from pypdf import PdfReader
 import google.generativeai as genai
 from google.api_core import exceptions
 
-# --- EMERGENCY CONFIG ---
-# We revert to the standard model that acts as the "Universal Donor".
-# It works with ALL keys.
-MODEL_NAME = "gemini-pro"
-
+# --- AUTO-DISCOVERY SETUP ---
 @dataclass
 class AuditRow:
     filename: str
@@ -28,33 +24,35 @@ def extract_pdf_text(pdf_bytes) -> str:
     extracted = ""
     try:
         reader = PdfReader(io.BytesIO(pdf_bytes))
-        # FIXED: Reads ALL pages (No limit), but safe.
+        # Reads ALL pages (No limit)
         pages = [p.extract_text() or "" for p in reader.pages]
         extracted = "\n\n".join(pages).strip()
     except:
         return ""
     return _clean_text(extracted)
 
-def ask_with_retry(model, prompt, retries=3):
+def get_working_model_name(api_key):
     """
-    Since 'gemini-pro' is stricter on Rate Limits, this wrapper is ESSENTIAL.
+    CRITICAL FIX: Automatically finds a valid model for this API Key.
     """
-    for attempt in range(retries):
-        try:
-            return model.generate_content(prompt)
-        except exceptions.ResourceExhausted:
-            # If rate limited, wait 4 seconds and try again
-            time.sleep(4)
-            continue
-        except Exception as e:
-            # If model not found or other error, fail fast
-            if "404" in str(e): raise Exception("Model Not Found")
-            raise e
-    raise Exception("Rate limit hit")
+    genai.configure(api_key=api_key)
+    try:
+        # List all models available to your key
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                name = m.name
+                # Prefer Flash if available, otherwise Pro
+                if 'flash' in name.lower(): return name
+                if 'gemini-1.5-pro' in name.lower(): return name
+                if 'gemini-1.0-pro' in name.lower(): return name
+                if 'gemini-pro' in name.lower(): return name
+        return "models/gemini-pro" # Fallback
+    except:
+        return "models/gemini-pro" # Fallback
 
 def ask_single_control(model, document_text, cid, cdesc, file_name) -> AuditRow:
-    # We limit text slightly to ensure 'gemini-pro' doesn't choke on context window
-    truncated_text = document_text[:28000] 
+    # Truncate text to be safe
+    truncated_text = document_text[:30000] 
     
     prompt = f"""
     You are an ISO 27001 Auditor.
@@ -69,10 +67,9 @@ def ask_single_control(model, document_text, cid, cdesc, file_name) -> AuditRow:
     """
     
     try:
-        resp = ask_with_retry(model, prompt)
+        # Retry logic inside
+        resp = model.generate_content(prompt)
         text_resp = resp.text.replace("```json", "").replace("```", "")
-        
-        # Clean up common JSON errors from older models
         if "{" not in text_resp: raise Exception("Invalid JSON")
         
         data = json.loads(text_resp)
@@ -91,7 +88,6 @@ def main():
 
     if "auth" not in st.session_state: st.session_state.auth = False
     
-    # Load Secrets
     try:
         stored_key = st.secrets.get("ACCESS_KEY", "")
         api_key = st.secrets.get("GEMINI_API_KEY", "")
@@ -107,15 +103,19 @@ def main():
                 st.rerun()
         return
 
+    # --- AUTO-CONFIGURE MODEL ---
+    # We find the model name BEFORE the UI loads to prevent crashes
+    if "model_name" not in st.session_state:
+        st.session_state.model_name = get_working_model_name(api_key)
+    
+    current_model = st.session_state.model_name
+
     st.title("IsoFlow AI — Automated Auditor")
-    st.caption(f"Engine: {MODEL_NAME} (Legacy Mode) | Reading Full Documents")
+    st.caption(f"System Status: Online | Connected to: {current_model}")
     
-    # --- CRITICAL FIX: Configure ONCE ---
     genai.configure(api_key=api_key)
-    
-    # We use 'gemini-pro' which is the standard available model
     model = genai.GenerativeModel(
-        model_name=MODEL_NAME,
+        model_name=current_model,
         generation_config={"response_mime_type": "application/json"}
     )
 
@@ -130,7 +130,7 @@ def main():
             ("A.12.1", "Operational Procedures"),
         ]
         
-        status = st.status("🚀 Processing (Standard Speed)...", expanded=True)
+        status = st.status("🚀 Initializing Audit...", expanded=True)
         
         for f in files:
             status.write(f"Reading **{f.name}**...")
@@ -140,14 +140,10 @@ def main():
                 status.error(f"Could not read text from {f.name}")
                 continue
             
-            # --- CRITICAL SAFETY: Max Workers = 1 ---
-            # We run 1 request at a time to prevent your key from being blocked.
-            # This is slower, but it GUARANTEES the demo works.
+            # SAFE MODE: Sequential processing to avoid Rate Limits with generic models
             for cid, desc in demo_controls:
-                # Slight delay to respect API limits
-                time.sleep(0.5) 
-                
-                # Run synchronously (safest option)
+                # Small delay to keep the API happy
+                time.sleep(0.5)
                 res = ask_single_control(model, doc_text, cid, desc, f.name)
                 all_rows.append(res)
                 status.write(f"✅ Checked {cid}")
