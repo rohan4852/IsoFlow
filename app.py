@@ -9,16 +9,11 @@ from google.api_core import exceptions
 # --- CONFIGURATION ---
 ISO_CONTROLS = [
     ("A.5.1", "Policies for information security"),
-    ("A.6.1.2", "Segregation of duties"),
-    ("A.7.2", "Screening"),
     ("A.8.2", "Privileged access rights"),
-    ("A.8.10", "Information deletion"),
     ("A.9.1", "Access control policy"),
     ("A.10.1", "Cryptography policy"), 
     ("A.12.1", "Documented operating procedures"),
     ("A.13.1", "Network security management"),
-    ("A.14.2.1", "Secure development policy"),
-    ("A.15.2", "Supplier service delivery management")
 ]
 
 @dataclass
