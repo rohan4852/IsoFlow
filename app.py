@@ -96,7 +96,7 @@ def ask_single_control(model, document_text, cid, cdesc, file_name) -> AuditRow:
 
 
 def main():
-    st.set_page_config(page_title="IsoFlowAI", layout="wide")
+    st.set_page_config(page_title="IsoFlow", layout="wide")
     st.markdown("<style>header {visibility: hidden;} footer {visibility: hidden;}</style>", unsafe_allow_html=True)
 
     if "auth" not in st.session_state: st.session_state.auth = False
@@ -121,7 +121,7 @@ def main():
     
     current_model = st.session_state.model_name
 
-    st.title("IsoFlowAI — Automated Auditor")
+    st.title("IsoFlow — Automated Auditor")
     st.caption("🟢 System Status: Online | Environment: Isolated RAM Compute (Zero-Retention)")
     
     genai.configure(api_key=api_key)
