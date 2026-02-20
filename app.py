@@ -7,30 +7,6 @@ import google.generativeai as genai
 from google.api_core import exceptions
 from excel_formatter import generate_excel_bytes
 
-# --- CONFIGURATION ---
-# Initialize an empty list for controls
-active_controls = []
-
-if matrix_file is not None:
-    # Read the uploaded CSV
-    df = pd.read_csv(matrix_file)
-    
-    # Dynamically grab the first column (ID) and second column (Description)
-    # and turn them into a list of tuples, exactly like your hardcoded version!
-    active_controls = list(zip(df.iloc[:, 0], df.iloc[:, 1]))
-    
-    st.success(f"Successfully loaded {len(active_controls)} custom controls!")
-else:
-    # Fallback to your hardcoded ISO 27001 controls if they don't upload a custom matrix
-    active_controls = [
-        ("A.5.1", "Policies for information security"),
-        ("A.8.2", "Privileged access rights"),
-        ("A.9.1", "Access control policy"),
-        ("A.10.1", "Cryptography policy"), 
-        ("A.12.1", "Documented operating procedures"),
-        ("A.13.1", "Network security management"),
-    ]
-
 @dataclass
 class AuditRow:
     filename: str
@@ -67,7 +43,7 @@ def get_working_model_name(api_key):
     except:
         return "models/gemini-pro"
 
-# --- THE FIX: SMART RETRY LOGIC ---
+# --- SMART RETRY LOGIC ---
 def ask_with_backoff(model, prompt, retries=3):
     """
     If the API blocks us, we wait and try again.
@@ -102,7 +78,7 @@ def ask_single_control(model, document_text, cid, cdesc, file_name) -> AuditRow:
     """
     
     try:
-        # Use the new Smart Retry function
+        # Use the Smart Retry function
         resp = ask_with_backoff(model, prompt)
         
         text_resp = resp.text.replace("```json", "").replace("```", "")
@@ -117,6 +93,7 @@ def ask_single_control(model, document_text, cid, cdesc, file_name) -> AuditRow:
         )
     except Exception as e:
         return AuditRow(filename=file_name, control_id=cid, audit_finding="Error", evidence="Processing Failed")
+
 
 def main():
     st.set_page_config(page_title="IsoFlowAI", layout="wide")
@@ -153,12 +130,28 @@ def main():
         generation_config={"response_mime_type": "application/json"}
     )
 
+    # --- UI: UPLOAD MATRIX ---
     st.subheader("1. Upload Custom Control Matrix (SOC 1 / Custom)")
-matrix_file = st.file_uploader("Upload Matrix (CSV)", type=["csv"])
+    matrix_file = st.file_uploader("Upload Matrix (CSV)", type=["csv"])
 
-st.subheader("2. Upload Policy Document")
-pdf_file = st.file_uploader("Upload Evidence (PDF)", type=["pdf"])
+    # --- LOGIC: PROCESS MATRIX ---
+    active_controls = []
+    if matrix_file is not None:
+        df_matrix = pd.read_csv(matrix_file)
+        active_controls = list(zip(df_matrix.iloc[:, 0], df_matrix.iloc[:, 1]))
+        st.success(f"Successfully loaded {len(active_controls)} custom controls!")
+    else:
+        active_controls = [
+            ("A.5.1", "Policies for information security"),
+            ("A.8.2", "Privileged access rights"),
+            ("A.9.1", "Access control policy"),
+            ("A.10.1", "Cryptography policy"), 
+            ("A.12.1", "Documented operating procedures"),
+            ("A.13.1", "Network security management"),
+        ]
 
+    # --- UI: UPLOAD PDF ---
+    st.subheader("2. Upload Policy Document")
     files = st.file_uploader("Upload Evidence (PDF)", type=["pdf"], accept_multiple_files=True)
     
     if st.button("Run Full Audit", type="primary", disabled=not files):
@@ -181,14 +174,12 @@ pdf_file = st.file_uploader("Upload Evidence (PDF)", type=["pdf"])
             for cid, desc in active_controls:
                 status.write(f"🔍 Checking **{cid}**...")
                 
-                # Check control with auto-retry
                 res = ask_single_control(model, doc_text, cid, desc, f.name)
                 all_rows.append(res)
                 
                 current_step += 1
                 progress_bar.progress(current_step / total_steps)
                 
-                # BASE DELAY: Wait 1 second between requests to be safe
                 time.sleep(1.0) 
 
         status.update(label="✅ Audit Complete!", state="complete", expanded=False)
@@ -210,20 +201,26 @@ pdf_file = st.file_uploader("Upload Evidence (PDF)", type=["pdf"])
                 hide_index=True
             )
             
+            # Save the raw CSV for the formatter to use
+            df.to_csv('report.csv', index=False)
             csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button("Download Report (CSV)", csv, "report.csv", "text/csv")
-            # Once the AI is done and report.csv exists, show the download button:
+            
             st.success("Analysis Complete!")
-            # Generate the beautiful Excel file in memory
-            excel_data = generate_excel_bytes('report.csv')
-
-           # Show the Streamlit Download Button
-           st.download_button(
-           label="📊 Download Enterprise Excel Report",
-           data=excel_data,
-           file_name="IsoFlow_Audit_Report.xlsx",
-           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.download_button("Download Raw Data (CSV)", csv, "report.csv", "text/csv")
+            
+            with col2:
+                # Generate the beautiful Excel file in memory
+                excel_data = generate_excel_bytes('report.csv')
+                st.download_button(
+                    label="📊 Download Enterprise Excel Report",
+                    data=excel_data,
+                    file_name="IsoFlow_Audit_Report.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                )
 
 if __name__ == "__main__":
     main()
