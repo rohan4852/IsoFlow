@@ -8,14 +8,28 @@ from google.api_core import exceptions
 from excel_formatter import generate_excel_bytes
 
 # --- CONFIGURATION ---
-ISO_CONTROLS = [
-    ("A.5.1", "Policies for information security"),
-    ("A.8.2", "Privileged access rights"),
-    ("A.9.1", "Access control policy"),
-    ("A.10.1", "Cryptography policy"), 
-    ("A.12.1", "Documented operating procedures"),
-    ("A.13.1", "Network security management"),
-]
+# Initialize an empty list for controls
+active_controls = []
+
+if matrix_file is not None:
+    # Read the uploaded CSV
+    df = pd.read_csv(matrix_file)
+    
+    # Dynamically grab the first column (ID) and second column (Description)
+    # and turn them into a list of tuples, exactly like your hardcoded version!
+    active_controls = list(zip(df.iloc[:, 0], df.iloc[:, 1]))
+    
+    st.success(f"Successfully loaded {len(active_controls)} custom controls!")
+else:
+    # Fallback to your hardcoded ISO 27001 controls if they don't upload a custom matrix
+    active_controls = [
+        ("A.5.1", "Policies for information security"),
+        ("A.8.2", "Privileged access rights"),
+        ("A.9.1", "Access control policy"),
+        ("A.10.1", "Cryptography policy"), 
+        ("A.12.1", "Documented operating procedures"),
+        ("A.13.1", "Network security management"),
+    ]
 
 @dataclass
 class AuditRow:
@@ -139,12 +153,18 @@ def main():
         generation_config={"response_mime_type": "application/json"}
     )
 
+    st.subheader("1. Upload Custom Control Matrix (SOC 1 / Custom)")
+matrix_file = st.file_uploader("Upload Matrix (CSV)", type=["csv"])
+
+st.subheader("2. Upload Policy Document")
+pdf_file = st.file_uploader("Upload Evidence (PDF)", type=["pdf"])
+
     files = st.file_uploader("Upload Evidence (PDF)", type=["pdf"], accept_multiple_files=True)
     
     if st.button("Run Full Audit", type="primary", disabled=not files):
         
         all_rows = []
-        total_steps = len(files) * len(ISO_CONTROLS)
+        total_steps = len(files) * len(active_controls)
         current_step = 0
         
         status = st.status("🚀 Initializing Full Audit...", expanded=True)
@@ -158,7 +178,7 @@ def main():
                 status.error(f"Could not read text from {f.name}")
                 continue
             
-            for cid, desc in ISO_CONTROLS:
+            for cid, desc in active_controls:
                 status.write(f"🔍 Checking **{cid}**...")
                 
                 # Check control with auto-retry
