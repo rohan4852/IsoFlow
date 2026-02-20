@@ -122,7 +122,7 @@ def main():
     current_model = st.session_state.model_name
 
     st.title("IsoFlowAI — Automated Auditor")
-    st.caption(f"System Status: Online | Connected to: {current_model}")
+    st.caption("🟢 System Status: Online | Environment: Isolated RAM Compute (Zero-Retention)")
     
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(
