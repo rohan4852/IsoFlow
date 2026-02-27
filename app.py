@@ -171,16 +171,26 @@ def main():
                 status.error(f"Could not read text from {f.name}")
                 continue
             
-            for cid, desc in active_controls:
-                status.write(f"🔍 Checking **{cid}**...")
+# The Engine Upgrade: Asynchronous Parallel Processing
+            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+                # 1. Submit all controls to be mapped at the exact same time
+                future_to_control = {
+                    executor.submit(ask_single_control, model, doc_text, cid, desc, f.name): cid 
+                    for cid, desc in active_controls
+                }
                 
-                res = ask_single_control(model, doc_text, cid, desc, f.name)
-                all_rows.append(res)
-                
-                current_step += 1
-                progress_bar.progress(current_step / total_steps)
-                
-                time.sleep(1.0) 
+                # 2. Catch them as they finish and update the UI instantly
+                for future in concurrent.futures.as_completed(future_to_control):
+                    cid = future_to_control[future]
+                    res = future.result()
+                    all_rows.append(res)
+                    
+                    status.write(f"⚡ Extracted evidence for **{cid}**")
+                    
+                    current_step += 1
+                    # Ensure progress bar doesn't break if steps get weird
+                    safe_progress = min(current_step / total_steps, 1.0)
+                    progress_bar.progress(safe_progress)
 
         status.update(label="✅ Audit Complete!", state="complete", expanded=False)
         progress_bar.empty()
