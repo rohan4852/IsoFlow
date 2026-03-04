@@ -129,9 +129,35 @@ def main():
         model_name=current_model,
         generation_config={"response_mime_type": "application/json"}
     )
+    st.info("Don't have your client files handy? See the engine in action.")
 
+    if st.button("🚀 Run Sample SOC 2 Mapping (1-Click Demo)"):
+    with st.spinner("Processing sample 5-page PDF and 10-row Control Matrix..."):
+        
+        # 1. Point to your local dummy files
+        dummy_pdf_path = "dummy_policy.pdf"
+        dummy_csv_path = "dummy_controls.csv"
+        
+        try:
+            # 2. Call your existing Gemini processing function here
+            # Make sure your function can accept file paths directly, not just Streamlit UploadedFile objects
+            # excel_output = your_existing_gemini_function(dummy_pdf_path, dummy_csv_path)
+            
+            st.success("Mapping Complete! Verbatim evidence extracted.")
+            
+            # 3. Serve the download button
+            # st.download_button(
+            #     label="📥 Download Audit-Ready Excel", 
+            #     data=excel_output, 
+            #     file_name="Sample_SOC2_Mapping.xlsx"
+            # )
+            
+        except Exception as e:
+            st.error(f"Engine error: {e}")
+
+st.divider()
     # --- UI: UPLOAD MATRIX ---
-    st.subheader("1. Upload Custom Control Matrix (SOC 1 / Custom)")
+    st.subheader("1. Or Upload Your Own Custom Matrix (SOC 1 / Custom)")
     matrix_file = st.file_uploader("Upload Matrix (CSV)", type=["csv"])
 
     # --- LOGIC: PROCESS MATRIX ---
