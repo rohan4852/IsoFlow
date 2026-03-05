@@ -6,6 +6,7 @@ from pypdf import PdfReader
 import google.generativeai as genai
 from google.api_core import exceptions
 from excel_formatter import generate_excel_bytes
+import os
 
 @dataclass
 class AuditRow:
@@ -26,7 +27,7 @@ def extract_pdf_text(pdf_bytes) -> str:
         reader = PdfReader(io.BytesIO(pdf_bytes))
         pages = [p.extract_text() or "" for p in reader.pages]
         extracted = "\n\n".join(pages).strip()
-    except:
+    except Exception as e:
         return ""
     return _clean_text(extracted)
 
@@ -95,6 +96,49 @@ def ask_single_control(model, document_text, cid, cdesc, file_name) -> AuditRow:
         return AuditRow(filename=file_name, control_id=cid, audit_finding="Error", evidence="Processing Failed")
 
 
+def process_audit(files_data, active_controls, model):
+    """
+    Helper function to run the multi-threaded extraction logic.
+    files_data is a list of tuples: (filename, document_text)
+    """
+    all_rows = []
+    total_steps = len(files_data) * len(active_controls)
+    current_step = 0
+    
+    status = st.status("🚀 Initializing Full Audit...", expanded=True)
+    progress_bar = st.progress(0)
+    
+    for filename, doc_text in files_data:
+        status.write(f"Reading **{filename}**...")
+        
+        if not doc_text:
+            status.error(f"Could not read text from {filename}")
+            continue
+            
+        # The Engine Upgrade: Asynchronous Parallel Processing
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            # 1. Submit all controls to be mapped at the exact same time
+            future_to_control = {
+                executor.submit(ask_single_control, model, doc_text, cid, desc, filename): cid 
+                for cid, desc in active_controls
+            }
+            
+            # 2. Catch them as they finish and update the UI instantly
+            for future in concurrent.futures.as_completed(future_to_control):
+                cid = future_to_control[future]
+                res = future.result()
+                all_rows.append(res)
+                
+                status.write(f"⚡ Extracted evidence for **{cid}**")
+                
+                current_step += 1
+                safe_progress = min(current_step / total_steps, 1.0)
+                progress_bar.progress(safe_progress)
+
+    status.update(label="✅ Audit Complete!", state="complete", expanded=False)
+    progress_bar.empty()
+    return all_rows
+
 def main():
     st.set_page_config(page_title="IsoFlow", layout="wide")
     st.markdown("<style>header {visibility: hidden;} footer {visibility: hidden;}</style>", unsafe_allow_html=True)
@@ -129,38 +173,70 @@ def main():
         model_name=current_model,
         generation_config={"response_mime_type": "application/json"}
     )
+    
+    # --- 1-CLICK DEMO SECTION ---
     st.info("Don't have your client files handy? See the engine in action.")
 
     if st.button("🚀 Run Sample SOC 2 Mapping (1-Click Demo)"):
-    with st.spinner("Processing sample 5-page PDF and 10-row Control Matrix..."):
-        
-        # 1. Point to your local dummy files
-        dummy_pdf_path = "dummy_policy.pdf"
-        dummy_csv_path = "dummy_controls.csv"
-        
-        try:
-            # 2. Call your existing Gemini processing function here
-            # Make sure your function can accept file paths directly, not just Streamlit UploadedFile objects
-            # excel_output = your_existing_gemini_function(dummy_pdf_path, dummy_csv_path)
+        with st.spinner("Processing sample PDF and Control Matrix..."):
             
-            st.success("Mapping Complete! Verbatim evidence extracted.")
+            dummy_pdf_path = "dummy_policy.pdf"
+            dummy_csv_path = "dummy_controls.csv"
             
-            # 3. Serve the download button
-            # st.download_button(
-            #     label="📥 Download Audit-Ready Excel", 
-            #     data=excel_output, 
-            #     file_name="Sample_SOC2_Mapping.xlsx"
-            # )
-            
-        except Exception as e:
-            st.error(f"Engine error: {e}")
+            if not os.path.exists(dummy_pdf_path) or not os.path.exists(dummy_csv_path):
+                st.error("Missing demo files on server! Please upload 'dummy_policy.pdf' and 'dummy_controls.csv' to the repo.")
+            else:
+                try:
+                    # 1. Read the local dummy PDF
+                    with open(dummy_pdf_path, "rb") as f:
+                        dummy_pdf_bytes = f.read()
+                    doc_text = extract_pdf_text(dummy_pdf_bytes)
+                    
+                    # 2. Read the local dummy CSV
+                    df_dummy = pd.read_csv(dummy_csv_path)
+                    dummy_controls = list(zip(df_dummy.iloc[:, 0], df_dummy.iloc[:, 1]))
+                    
+                    # 3. Process using the shared helper function
+                    files_data = [("dummy_policy.pdf", doc_text)]
+                    all_rows = process_audit(files_data, dummy_controls, model)
+                    
+                    if all_rows:
+                        df = pd.DataFrame([asdict(r) for r in all_rows])
+                        st.subheader("📋 Audit Findings (Demo Data)")
+                        st.dataframe(
+                            df, 
+                            column_config={
+                                "control_id": st.column_config.TextColumn("ID", width="small"),
+                                "audit_finding": st.column_config.TextColumn("Status", width="small"),
+                                "evidence": st.column_config.TextColumn("Verbatim Evidence", width="large"),
+                                "filename": st.column_config.TextColumn("File", width="medium"),
+                            },
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                        
+                        df.to_csv('demo_report.csv', index=False)
+                        
+                        try:
+                            excel_data = generate_excel_bytes('demo_report.csv')
+                            st.download_button(
+                                label="📊 Download Enterprise Excel Report (Demo)",
+                                data=excel_data,
+                                file_name="Sample_SOC2_Mapping.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            )
+                        except Exception as excel_err:
+                            st.warning(f"Could not format Excel (check formatting script): {excel_err}")
+                            
+                except Exception as e:
+                    st.error(f"Engine error: {e}")
 
-st.divider()
+    st.divider()
+
     # --- UI: UPLOAD MATRIX ---
     st.subheader("1. Or Upload Your Own Custom Matrix (SOC 1 / Custom)")
     matrix_file = st.file_uploader("Upload Matrix (CSV)", type=["csv"])
 
-    # --- LOGIC: PROCESS MATRIX ---
     active_controls = []
     if matrix_file is not None:
         df_matrix = pd.read_csv(matrix_file)
@@ -182,44 +258,14 @@ st.divider()
     
     if st.button("Run Full Audit", type="primary", disabled=not files):
         
-        all_rows = []
-        total_steps = len(files) * len(active_controls)
-        current_step = 0
-        
-        status = st.status("🚀 Initializing Full Audit...", expanded=True)
-        progress_bar = st.progress(0)
-        
+        # Prepare data for processing
+        files_data = []
         for f in files:
-            status.write(f"Reading **{f.name}**...")
             doc_text = extract_pdf_text(f.getvalue())
+            files_data.append((f.name, doc_text))
             
-            if not doc_text:
-                status.error(f"Could not read text from {f.name}")
-                continue
-            
-# The Engine Upgrade: Asynchronous Parallel Processing
-            with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-                # 1. Submit all controls to be mapped at the exact same time
-                future_to_control = {
-                    executor.submit(ask_single_control, model, doc_text, cid, desc, f.name): cid 
-                    for cid, desc in active_controls
-                }
-                
-                # 2. Catch them as they finish and update the UI instantly
-                for future in concurrent.futures.as_completed(future_to_control):
-                    cid = future_to_control[future]
-                    res = future.result()
-                    all_rows.append(res)
-                    
-                    status.write(f"⚡ Extracted evidence for **{cid}**")
-                    
-                    current_step += 1
-                    # Ensure progress bar doesn't break if steps get weird
-                    safe_progress = min(current_step / total_steps, 1.0)
-                    progress_bar.progress(safe_progress)
-
-        status.update(label="✅ Audit Complete!", state="complete", expanded=False)
-        progress_bar.empty()
+        # Process using the shared helper function
+        all_rows = process_audit(files_data, active_controls, model)
         
         if all_rows:
             df = pd.DataFrame([asdict(r) for r in all_rows])
@@ -249,14 +295,17 @@ st.divider()
                 st.download_button("Download Raw Data (CSV)", csv, "report.csv", "text/csv")
             
             with col2:
-                # Generate the beautiful Excel file in memory
-                excel_data = generate_excel_bytes('report.csv')
-                st.download_button(
-                    label="📊 Download Enterprise Excel Report",
-                    data=excel_data,
-                    file_name="IsoFlow_Audit_Report.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+                try:
+                    # Generate the beautiful Excel file in memory
+                    excel_data = generate_excel_bytes('report.csv')
+                    st.download_button(
+                        label="📊 Download Enterprise Excel Report",
+                        data=excel_data,
+                        file_name="IsoFlow_Audit_Report.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                except Exception as excel_err:
+                    st.error(f"Excel formatting failed. Check excel_formatter.py. Error: {excel_err}")
 
 if __name__ == "__main__":
     main()
