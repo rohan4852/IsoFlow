@@ -153,7 +153,7 @@ def main():
         return
 
     if not st.session_state.auth:
-        key = st.text_input("License Key", type="password")
+        key = st.text_input("PassKey", type="password")
         if st.button("Unlock"):
             if key == stored_key:
                 st.session_state.auth = True
