@@ -307,5 +307,8 @@ def main():
                 except Exception as excel_err:
                     st.error(f"Excel formatting failed. Check excel_formatter.py. Error: {excel_err}")
 
+# Upsell to the paid version
+            st.warning("🔒 Want to upload your own custom PDFs and run them on secure AWS servers? Purchase the Pro license.")
+
 if __name__ == "__main__":
     main()
