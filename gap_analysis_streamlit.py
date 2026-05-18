@@ -8,7 +8,7 @@ Features:
 - Summary statistics (compliance %, total controls, gaps)
 - Interactive filtering (All / Compliant / Gaps Only)
 - Dynamic CSV export for audit reports
-- Responsive table rendering with formatting
+- Responsive table rendering with formatted icons and evidence citations
 - Session state management for result persistence
 
 This module bridges the gap analysis engine with Streamlit UI components.
@@ -26,9 +26,9 @@ def render_gap_analysis_tab(extracted_text: str, model):
     
     Renders:
     - Summary statistics (compliance metrics)
-    - Interactive data table with filtering
+    - Interactive data table with filtering and visual status indicators
     - Dynamic CSV export button
-    - Visual status indicators
+    - Visual status indicators with icons
     
     Args:
         extracted_text: Combined text from uploaded documents
@@ -243,69 +243,43 @@ def render_gap_analysis_tab(extracted_text: str, model):
         
         st.info(filter_label)
         
-        # --- RESULTS TABLE ---
+        # --- INTERACTIVE RESULTS TABLE WITH FORMATTED EVIDENCE/GAP ANALYSIS ---
         st.write("")
         
-        # Create display dataframe
-        display_data = []
-        for result in filtered_results:
-            display_data.append({
-                "ID": result.id,
-                "Name": result.name,
-                "Category": result.category,
-                "Section": result.section,
-                "Status": "Compliant" if result.status == "Compliant" else "Gap Detected",
-                "Evidence / Gap": result.evidenceCitation if result.status == "Compliant" else result.gapComment,
-            })
-        
-        df_display = pd.DataFrame(display_data)
-        
-        # Render table with column configuration
-        st.dataframe(
-            df_display,
-            column_config={
-                "ID": st.column_config.TextColumn("Control ID", width="small"),
-                "Name": st.column_config.TextColumn("Control Name", width="medium"),
-                "Category": st.column_config.TextColumn("Type", width="small"),
-                "Section": st.column_config.TextColumn("Section", width="medium"),
-                "Status": st.column_config.TextColumn("Status", width="small"),
-                "Evidence / Gap": st.column_config.TextColumn("Evidence / Gap Analysis", width="large"),
-            },
-            use_container_width=True,
-            hide_index=True,
-            height=400
-        )
-        
-        # --- DETAILED EXPANDABLE VIEW ---
-        st.divider()
-        st.subheader("Detailed Control Information")
-        
-        # Create expandable sections for each result
-        for idx, result in enumerate(filtered_results, 1):
-            status_icon = "OK" if result.status == "Compliant" else "GAP"
+        # Render interactive table with dynamic columns
+        for idx, result in enumerate(filtered_results):
+            # Determine status icon and styling
+            if result.status == "Compliant":
+                status_icon = "✅"
+                evidence_content = result.evidenceCitation
+                evidence_label = "Evidence Found:"
+                content_type = "compliant"
+            else:
+                status_icon = "⚠️"
+                evidence_content = result.gapComment
+                evidence_label = "Gap Analysis:"
+                content_type = "gap"
             
-            with st.expander(f"{status_icon}: {result.id} - {result.name}"):
-                col1, col2 = st.columns([1, 1])
-                
-                with col1:
-                    st.write("**Control Details:**")
-                    st.write(f"- **ID:** {result.id}")
-                    st.write(f"- **Category:** {result.category}")
-                    st.write(f"- **Section:** {result.section}")
-                    st.write(f"- **Status:** {result.status}")
-                
-                with col2:
-                    st.write("**Requirement:**")
-                    st.info(result.requirement)
-                
-                st.divider()
-                
-                if result.status == "Compliant":
-                    st.write("**Evidence Found:**")
-                    st.success(f'"{result.evidenceCitation}"')
+            # Create table row with columns: Control ID, Name, Status, Evidence/Gap
+            col_id, col_name, col_status, col_evidence = st.columns([1, 2, 1.5, 3])
+            
+            with col_id:
+                st.write(f"**{result.id}**")
+            
+            with col_name:
+                st.write(result.name)
+            
+            with col_status:
+                st.write(f"{status_icon} {result.status}")
+            
+            with col_evidence:
+                # Render evidence/gap content in blockquote wrapper
+                if content_type == "compliant":
+                    st.markdown(f"> **{evidence_label}**\n\n> {evidence_content}")
                 else:
-                    st.write("**Gap Analysis:**")
-                    st.warning(result.gapComment)
+                    st.markdown(f"> **{evidence_label}**\n\n> {evidence_content}")
+            
+            st.divider()
         
         # --- CSV EXPORT ---
         st.divider()
