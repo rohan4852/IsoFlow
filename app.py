@@ -139,11 +139,38 @@ def process_audit(files_data, active_controls, model):
     progress_bar.empty()
     return all_rows
 
+def render_gap_analysis_tab(combined_text: str):
+    """
+    Renders the Gap Analysis tab using the combined document text.
+    This function will be called when audit_completed is True.
+    """
+    st.subheader("🔍 Internal Audit Readiness & Gap Assessment Matrix")
+    
+    if not combined_text or combined_text.strip() == "":
+        st.warning("No document text available for gap analysis.")
+        return
+    
+    st.info(f"Analyzing {len(combined_text)} characters of document text against ISO 27001:2022 framework...")
+    
+    # Placeholder for future gap analysis rendering
+    # This would integrate with GapAnalysisMatrix.tsx or Python-based rendering
+    with st.expander("📊 Gap Analysis Results (Coming Soon)"):
+        st.write("Gap analysis engine initialized. Full results will be displayed here.")
+        st.text_area("Document Text Preview", combined_text[:1000] + "...", height=200, disabled=True)
+
 def main():
     st.set_page_config(page_title="IsoFlow", layout="wide")
     st.markdown("<style>header {visibility: hidden;} footer {visibility: hidden;}</style>", unsafe_allow_html=True)
 
-    if "auth" not in st.session_state: st.session_state.auth = False
+    # --- INITIALIZE SESSION STATE ---
+    if "auth" not in st.session_state: 
+        st.session_state.auth = False
+    if "audit_completed" not in st.session_state:
+        st.session_state.audit_completed = False
+    if "all_rows" not in st.session_state:
+        st.session_state.all_rows = []
+    if "combined_text" not in st.session_state:
+        st.session_state.combined_text = ""
     
     try:
         stored_key = st.secrets.get("ACCESS_KEY", "")
@@ -256,6 +283,7 @@ def main():
     st.subheader("2. Upload Policy Document")
     files = st.file_uploader("Upload Evidence (PDF)", type=["pdf"], accept_multiple_files=True)
     
+    # --- BUTTON CLICK: EXECUTE AUDIT AND SAVE TO SESSION STATE ---
     if st.button("Run Full Audit", type="primary", disabled=not files):
         
         # Prepare data for processing
@@ -263,13 +291,34 @@ def main():
         for f in files:
             doc_text = extract_pdf_text(f.getvalue())
             files_data.append((f.name, doc_text))
-            
+        
         # Process using the shared helper function
         all_rows = process_audit(files_data, active_controls, model)
         
+        # Save results to session state
         if all_rows:
-            df = pd.DataFrame([asdict(r) for r in all_rows])
+            st.session_state.all_rows = all_rows
             
+            # Combine all document text for gap analysis
+            combined_text = "\n\n".join([doc_text for _, doc_text in files_data])
+            st.session_state.combined_text = combined_text
+            
+            # Mark audit as completed
+            st.session_state.audit_completed = True
+            
+            # Trigger rerun to display persistent UI
+            st.rerun()
+    
+    # --- PERSISTENT TAB RENDERING (SEPARATE TOP-LEVEL CHECK) ---
+    if st.session_state.audit_completed:
+        
+        # Convert all_rows to DataFrame for display
+        df = pd.DataFrame([asdict(r) for r in st.session_state.all_rows])
+        
+        # Create tabs
+        tab1, tab2 = st.tabs(["📋 Audit Findings", "🔍 Gap Analysis"])
+        
+        with tab1:
             st.subheader("📋 Audit Findings")
             st.dataframe(
                 df, 
@@ -287,12 +336,12 @@ def main():
             df.to_csv('report.csv', index=False)
             csv = df.to_csv(index=False).encode('utf-8')
             
-            st.success("Analysis Complete!")
+            st.success("✅ Analysis Complete!")
             
             col1, col2 = st.columns(2)
             
             with col1:
-                st.download_button("Download Raw Data (CSV)", csv, "report.csv", "text/csv")
+                st.download_button("📥 Download Raw Data (CSV)", csv, "report.csv", "text/csv")
             
             with col2:
                 try:
@@ -306,9 +355,21 @@ def main():
                     )
                 except Exception as excel_err:
                     st.error(f"Excel formatting failed. Check excel_formatter.py. Error: {excel_err}")
-
-# Upsell to the paid version
+            
+            # Upsell to the paid version
             st.warning("🔒 Want to upload your own custom PDFs and run them on secure AWS servers? Purchase the Pro license.")
+        
+        with tab2:
+            # Render gap analysis tab using combined_text from session state
+            render_gap_analysis_tab(st.session_state.combined_text)
+        
+        # Add a "Reset Audit" button to clear session state
+        st.divider()
+        if st.button("🔄 Reset & Start New Audit"):
+            st.session_state.audit_completed = False
+            st.session_state.all_rows = []
+            st.session_state.combined_text = ""
+            st.rerun()
 
 if __name__ == "__main__":
     main()
