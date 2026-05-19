@@ -140,25 +140,6 @@ def process_audit(files_data, active_controls, model):
     progress_bar.empty()
     return all_rows
 
-def render_gap_analysis_tab(combined_text: str):
-    """
-    Renders the Gap Analysis tab using the combined document text.
-    This function will be called when audit_completed is True.
-    """
-    st.subheader("🔍 Internal Audit Readiness & Gap Assessment Matrix")
-    
-    if not combined_text or combined_text.strip() == "":
-        st.warning("No document text available for gap analysis.")
-        return
-    
-    st.info(f"Analyzing {len(combined_text)} characters of document text against ISO 27001:2022 framework...")
-    
-    # Placeholder for future gap analysis rendering
-    # This would integrate with GapAnalysisMatrix.tsx or Python-based rendering
-    with st.expander("📊 Gap Analysis Results (Coming Soon)"):
-        st.write("Gap analysis engine initialized. Full results will be displayed here.")
-        st.text_area("Document Text Preview", combined_text[:1000] + "...", height=200, disabled=True)
-
 def main():
     st.set_page_config(page_title="IsoFlow", layout="wide")
     st.markdown("<style>header {visibility: hidden;} footer {visibility: hidden;}</style>", unsafe_allow_html=True)
@@ -361,9 +342,9 @@ def main():
             st.warning("🔒 Want to upload your own custom PDFs and run them on secure AWS servers? Purchase the Pro license.")
         
         with tab2:
-            st.info("📌 Gap Analysis runs a systematic ISO 27001:2022 compliance assessment")
             render_gap_analysis_tab(
-                combined_text=st.session_state.combined_text
+                extracted_text=st.session_state.combined_text,
+                model=model
             )
             
             # Add a "Reset Audit" button to clear session state
