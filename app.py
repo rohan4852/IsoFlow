@@ -6,6 +6,7 @@ from pypdf import PdfReader
 import google.generativeai as genai
 from google.api_core import exceptions
 from excel_formatter import generate_excel_bytes
+from gap_analysis_streamlit import render_gap_analysis_tab
 import os
 
 @dataclass
@@ -360,8 +361,11 @@ def main():
             st.warning("🔒 Want to upload your own custom PDFs and run them on secure AWS servers? Purchase the Pro license.")
         
         with tab2:
-            # Render gap analysis tab using combined_text from session state
-            render_gap_analysis_tab(st.session_state.combined_text)
+    st.info("📌 Gap Analysis runs a systematic ISO 27001:2022 compliance assessment")
+    render_gap_analysis_tab(
+        extracted_text=st.session_state.combined_text,
+        model=model
+    )
         
         # Add a "Reset Audit" button to clear session state
         st.divider()
