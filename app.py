@@ -360,7 +360,7 @@ def main():
             # Upsell to the paid version
             st.warning("🔒 Want to upload your own custom PDFs and run them on secure AWS servers? Purchase the Pro license.")
         
-        with tab2:
+with tab2:
     st.info("📌 Gap Analysis runs a systematic ISO 27001:2022 compliance assessment")
     render_gap_analysis_tab(
         extracted_text=st.session_state.combined_text,
