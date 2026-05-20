@@ -11,7 +11,7 @@ This module implements:
 - Exponential backoff retry logic for API rate limits
 - JSON validation for LLM responses
 - Zero-database architecture (stateless, volatile memory)
-- Parallel control evaluation with ThreadPoolExecutor (max_workers=10)
+- Parallel control evaluation with ThreadPoolExecutor (max_workers=3)
 
 Source: ISO 27001:2022 Internal Audit Checklist (CIC)
 """
