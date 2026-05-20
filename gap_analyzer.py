@@ -11,6 +11,7 @@ This module implements:
 - Exponential backoff retry logic for API rate limits
 - JSON validation for LLM responses
 - Zero-database architecture (stateless, volatile memory)
+- Parallel control evaluation with ThreadPoolExecutor (max_workers=10)
 
 Source: ISO 27001:2022 Internal Audit Checklist (CIC)
 """
@@ -19,6 +20,7 @@ import json
 import time
 from dataclasses import dataclass
 from typing import List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import google.generativeai as genai
 
 
@@ -101,6 +103,7 @@ def ask_with_backoff(model, prompt: str, max_retries: int = 3) -> Optional[str]:
     Execute a Gemini API call with exponential backoff for rate limiting.
     
     Handles 429 (Too Many Requests) and ResourceExhausted errors gracefully.
+    Thread-safe for concurrent execution.
     
     Args:
         model: Generative model instance configured with API key
@@ -229,6 +232,8 @@ def evaluate_single_control(
     - No interpretation or paraphrasing
     - Clear gap identification when requirements are not met
     
+    Thread-safe for concurrent execution.
+    
     Args:
         model: Configured Gemini model instance
         document_text: Full or processed document text to analyze
@@ -252,7 +257,7 @@ def evaluate_single_control(
             document_text=truncated_text
         )
         
-        # Execute with exponential backoff
+        # Execute with exponential backoff (rate limit protected)
         response_text = ask_with_backoff(model, prompt, max_retries=3)
         
         if not response_text:
@@ -293,27 +298,29 @@ def evaluate_single_control(
 def run_gap_analysis(
     combined_text: str,
     model,
-    framework: List[object]
+    framework: List[object],
+    max_workers: int = 10
 ) -> List[AnalysisResult]:
     """
-    Execute full gap analysis against all controls in the framework.
+    Execute full gap analysis against all controls in the framework using parallel processing.
     
     This is the main orchestration function that:
-    1. Iterates through all controls in the framework
-    2. Evaluates each control against the document text
+    1. Uses ThreadPoolExecutor with max_workers threads for concurrent evaluation
+    2. Evaluates each control against the document text in parallel
     3. Extracts verbatim evidence for compliant items
     4. Identifies gaps and root causes for non-compliant items
-    5. Maintains result order matching framework order
+    5. Maintains result order matching framework order (thread-safe)
+    6. Applies exponential backoff retry logic to all concurrent workers
     
     Args:
         combined_text: Full concatenated text from all uploaded documents
         model: Configured Gemini model instance
         framework: List of ControlRequirement objects from iso27001_framework
+        max_workers: Number of concurrent threads (default: 10)
     
     Returns:
         List of AnalysisResult objects in framework order
     """
-    results: List[AnalysisResult] = []
     
     if not combined_text or combined_text.strip() == "":
         # Return gaps for all controls if no text provided
@@ -333,19 +340,56 @@ def run_gap_analysis(
     
     print(f"\n🔍 Starting gap analysis for {len(framework)} controls...")
     print(f"📄 Document text length: {len(combined_text)} characters")
+    print(f"⚡ Using {max_workers} concurrent threads for parallel evaluation")
     
-    # Iterate through all controls
-    for idx, control in enumerate(framework, 1):
-        print(f"\n[{idx}/{len(framework)}] Analyzing {control.id} - {control.name}...")
+    # Create a mapping of control ID to framework index for result ordering
+    control_index_map = {ctrl.id: idx for idx, ctrl in enumerate(framework)}
+    
+    # Dictionary to store results indexed by control ID for thread-safe access
+    results_dict = {}
+    completed_count = 0
+    
+    # Execute controls in parallel using ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all tasks to the executor
+        future_to_control = {
+            executor.submit(evaluate_single_control, model, combined_text, control): control
+            for control in framework
+        }
         
-        result = evaluate_single_control(model, combined_text, control)
-        results.append(result)
-        
-        # Log result
-        if result.status == "Compliant":
-            print(f"  ✅ Compliant - Evidence found")
-        else:
-            print(f"  ⚠️  Gap Detected - {result.gapComment[:60]}...")
+        # Process completed tasks as they finish
+        for future in as_completed(future_to_control):
+            control = future_to_control[future]
+            completed_count += 1
+            
+            try:
+                result = future.result()
+                results_dict[result.id] = result
+                
+                # Log result
+                if result.status == "Compliant":
+                    print(f"[{completed_count}/{len(framework)}] ✅ {control.id} - Compliant")
+                else:
+                    gap_preview = result.gapComment[:60].replace('\n', ' ')
+                    print(f"[{completed_count}/{len(framework)}] ⚠️  {control.id} - Gap Detected: {gap_preview}...")
+            
+            except Exception as e:
+                # Handle task execution errors
+                error_result = AnalysisResult(
+                    id=control.id,
+                    name=control.name,
+                    category=control.category,
+                    section=control.section,
+                    requirement=control.requirement,
+                    status="Gap Detected",
+                    evidenceCitation="",
+                    gapComment=f"Task execution failed: {str(e)}. Manual review required."
+                )
+                results_dict[error_result.id] = error_result
+                print(f"[{completed_count}/{len(framework)}] ❌ {control.id} - Task failed: {str(e)[:50]}...")
+    
+    # Reconstruct results list in original framework order (thread-safe)
+    results = [results_dict[ctrl.id] for ctrl in framework]
     
     print(f"\n✅ Gap analysis complete!")
     print(f"   Total: {len(results)} controls")
@@ -477,7 +521,7 @@ if __name__ == "__main__":
     This demonstrates:
     - Importing framework
     - Configuring model
-    - Running gap analysis
+    - Running gap analysis with parallel processing (max_workers=10)
     - Computing statistics
     """
     print("=" * 70)
@@ -496,6 +540,8 @@ if __name__ == "__main__":
     print("\nTo use this engine in your application:")
     print("  1. Configure Gemini API with your key")
     print("  2. Call run_gap_analysis(combined_text, model, ISO27001_FRAMEWORK)")
+    print("     - Default: 10 concurrent workers for optimal throughput")
+    print("     - Customize: run_gap_analysis(..., max_workers=N)")
     print("  3. Process results with compute_analysis_summary()")
     
     print("\n" + "=" * 70)
