@@ -179,9 +179,9 @@ def main():
     
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(
-        model_name=current_model,
-        generation_config={"response_mime_type": "application/json"}
-    )
+    model_name="models/gemini-2.5-flash-lite",  # Upgraded free tier throughput
+    generation_config={"response_mime_type": "application/json"}
+)
     
     # --- 1-CLICK DEMO SECTION ---
     st.info("Don't have your client files handy? See the engine in action.")
