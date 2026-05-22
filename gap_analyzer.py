@@ -297,16 +297,14 @@ def run_gap_analysis(
     # Store results by framework index (thread-safe writes are fine because keys are unique)
     results_by_index: dict[int, AnalysisResult] = {}
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        futures = {
-            executor.submit(evaluate_batch, model, combined_text, batch): batch
-            for batch in batches
-        }
-
-        for fut in as_completed(futures):
-            batch = futures[fut]
+    # Strict rate limiting: run batches sequentially to keep total requests under the 10 RPM ceiling.
+    # JSON parsing + ordering remain unchanged.
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        for batch in batches:
             try:
+                fut = executor.submit(evaluate_batch, model, combined_text, batch)
                 batch_results = fut.result()
+
                 for r in batch_results:
                     results_by_index[id_to_index[r.id]] = r
 
@@ -314,6 +312,7 @@ def run_gap_analysis(
                 compliant_count = sum(1 for r in batch_results if r.status == "Compliant")
                 gap_count = sum(1 for r in batch_results if r.status == "Gap Detected")
                 print(f"✅ Batch {batch_ids}: Compliant={compliant_count}, Gaps={gap_count}")
+
             except Exception as e:
                 # Deterministic fallback for entire batch failure
                 err = str(e)
@@ -330,6 +329,11 @@ def run_gap_analysis(
                         evidenceCitation="",
                         gapComment=f"Batch analysis error: {err}. Manual review required.",
                     )
+
+            # Hard pacing to stay under 10 RPM: 7 seconds between calls.
+            # (If ask_with_backoff triggers additional waits on 429, those apply on top.)
+            time.sleep(7)
+
 
     # Reconstruct results in original framework order
     ordered_results: List[AnalysisResult] = [results_by_index[i] for i in range(len(framework))]
