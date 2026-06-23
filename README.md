@@ -14,4 +14,40 @@ IsoFlow Systems is a production-ready, highly optimized backend architecture des
 ---
 
 ## 🛠️ Technical Architecture & Data Flow
+[User Document Upload]
+│
+▼ (TLS 1.3 Encryption in Transit)
+[Streamlit UI Session Memory]
+│
+▼ (Ephemeral Memory Pass-Through)
+[Stateless Logic Engine / Core Parsers] ───► [Zero-Retention Enterprise API Gateway]
+│                                      (Gemini Enterprise / Anthropic)
+▼
+[Color-Coded Excel Audit Trail Generated]
+│
+▼ (Session Closure / Tab Exit)
+[Memory Wipe / Pure Stateless Cleanup]
+
+
+1. **Ingestion:** Supports `.pdf`, `.docx`, and `.txt` up to 200MB, as well as custom compliance matrices via `.csv`.
+2. **Processing:** Ephemeral compute executes isolation mapping via RAM-only execution layers. 
+3. **Export:** Generates a structured, styled Excel sheet detailing exact clause matching and gap analysis.
+4. **Purge:** Zero persistence layer. No external database connections are established, ensuring a completely clean liability profile.
+
+---
+
+## 📦 Repository Structure
+
+* `/ui` - Streamlit-based frontend implementation managing ephemeral user state and localized session variables.
+* `/logic` - Core parsing scripts, multi-model prompt orchestration layers, framework mapping logic, and Excel export format engines.
+
+---
+
+## ⚙️ Local Development Setup
+
+### 1. Environment Configuration
+Clone this repository and navigate to the project directory:
+```bash
+git clone [https://github.com/rohan4852/IsoFlow.git](https://github.com/rohan4852/IsoFlow.git)
+cd IsoFlow
 
