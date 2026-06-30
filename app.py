@@ -52,48 +52,86 @@ def ask_with_backoff(model, prompt, retries=3):
     """
     for i in range(retries):
         try:
-            return model.generate_content(prompt)
+            return model.generate_content(
+                prompt,
+                generation_config={"response_mime_type": "application/json", "temperature": 0.0},
+            )
         except Exception as e:
-            if "429" in str(e) or "ResourceExhausted" in str(e):
-                # RATE LIMIT HIT: Wait 5, 10, then 15 seconds
+            if "429" in str(e) or "ResourceExhausted" in str(e) or "Too Many Requests" in str(e):
                 wait_time = (i + 1) * 5
                 time.sleep(wait_time)
                 continue
-            else:
-                # If it's a real error (not speed), fail
-                raise e
+            raise e
     raise Exception("Timed out")
 
+
+def _strip_json_text(text: str) -> str:
+    if not isinstance(text, str):
+        return ""
+    s = text.strip()
+    if s.startswith("```json"):
+        s = s[len("```json") :].strip()
+    elif s.startswith("```"):
+        s = s[len("```") :].strip()
+    if s.endswith("```"):
+        s = s[: -len("```")].strip()
+
+    start = s.find("{")
+    end = s.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        s = s[start : end + 1]
+    return s.strip()
+
+
+def _parse_audit_response(text: str) -> dict:
+    cleaned = _strip_json_text(text)
+    if not cleaned:
+        raise ValueError("Empty response")
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        finding_match = re.search(r"finding\s*[:=]\s*[\"']?([A-Za-z ]+?)[\"']?(?:\s|,|$)", cleaned, re.I)
+        evidence_match = re.search(
+            r"evidence\s*[:=]\s*(?:\"(?P<quote>.*)\"|\'(?P<single>.*)\'|(?P<plain>.*))$",
+            cleaned,
+            re.I | re.S,
+        )
+        if not finding_match:
+            raise ValueError("Unable to parse JSON response")
+        evidence = evidence_match.group("quote") or evidence_match.group("single") or evidence_match.group("plain") or ""
+        return {
+            "finding": finding_match.group(1).strip(),
+            "evidence": evidence.strip() if isinstance(evidence, str) else "",
+        }
+
+
 def ask_single_control(model, document_text, cid, cdesc, file_name) -> AuditRow:
-    truncated_text = document_text[:35000] 
+    truncated_text = document_text[:120000]
     
     prompt = f"""
-    You are an ISO 27001 Auditor.
-    Task: Find verbatim evidence for Control {cid} ({cdesc}).
-    
-    Rules:
-    1. If found, return JSON: {{ "finding": "Compliant", "evidence": "Exact quote..." }}
-    2. If NOT found, return JSON: {{ "finding": "Not Found", "evidence": "No evidence found" }}
-    
-    Text:
+    You are a strict ISO 27001 Auditor.
+    Task: Search the document text below for exact verbatim evidence of Control {cid} ({cdesc}).
+
+    Output rules:
+    1) Return ONLY valid JSON, no markdown, no backticks, no extra text.
+    2) If evidence is found, return: {{"finding": "Compliant", "evidence": "Exact quote..."}}
+    3) If evidence is not found, return: {{"finding": "Not Found", "evidence": "No evidence found"}}
+    4) Do not hallucinate. Use ONLY text from the document.
+
+    Document text:
     {truncated_text}
     """
-    
     try:
-        # Use the Smart Retry function
         resp = ask_with_backoff(model, prompt)
-        
-        text_resp = resp.text.replace("```json", "").replace("```", "")
-        if "{" not in text_resp: raise Exception("Invalid JSON")
-        
-        data = json.loads(text_resp)
+        text_resp = getattr(resp, "text", "")
+        parsed = _parse_audit_response(text_resp)
         return AuditRow(
             filename=file_name,
             control_id=cid,
-            audit_finding=data.get("finding", "Manual Review"),
-            evidence=data.get("evidence", "No evidence found")
+            audit_finding=parsed.get("finding", "Manual Review"),
+            evidence=parsed.get("evidence", "No evidence found"),
         )
-    except Exception as e:
+    except Exception:
         return AuditRow(filename=file_name, control_id=cid, audit_finding="Error", evidence="Processing Failed")
 
 
@@ -171,6 +209,8 @@ def main():
 
     if "model_name" not in st.session_state:
         st.session_state.model_name = get_working_model_name(api_key)
+    if "active_controls" not in st.session_state:
+        st.session_state.active_controls = None
     
     current_model = st.session_state.model_name
 
@@ -246,13 +286,13 @@ def main():
     st.subheader("1. Or Upload Your Own Custom Matrix (SOC 1 / Custom)")
     matrix_file = st.file_uploader("Upload Matrix (CSV)", type=["csv"])
 
-    active_controls = []
     if matrix_file is not None:
         df_matrix = pd.read_csv(matrix_file)
-        active_controls = list(zip(df_matrix.iloc[:, 0], df_matrix.iloc[:, 1]))
-        st.success(f"Successfully loaded {len(active_controls)} custom controls!")
-    else:
-        active_controls = [
+        st.session_state.active_controls = list(zip(df_matrix.iloc[:, 0], df_matrix.iloc[:, 1]))
+        st.success(f"Successfully loaded {len(st.session_state.active_controls)} custom controls!")
+
+    if st.session_state.active_controls is None:
+        st.session_state.active_controls = [
             ("A.5.1", "Policies for information security"),
             ("A.8.2", "Privileged access rights"),
             ("A.9.1", "Access control policy"),
@@ -260,6 +300,8 @@ def main():
             ("A.12.1", "Documented operating procedures"),
             ("A.13.1", "Network security management"),
         ]
+
+    active_controls = st.session_state.active_controls
 
     # --- UI: UPLOAD PDF ---
     st.subheader("2. Upload Policy Document")
