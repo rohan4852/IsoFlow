@@ -219,7 +219,7 @@ def main():
     
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(
-    model_name="models/gemini-3.5-flash-lite",  # Upgraded free tier throughput
+    model_name="models/gemini-2.5-flash-lite",  # Upgraded free tier throughput
     generation_config={"response_mime_type": "application/json"}
 )
     
@@ -286,12 +286,20 @@ def main():
     st.subheader("1. Or Upload Your Own Custom Matrix (SOC 1 / Custom)")
     matrix_file = st.file_uploader("Upload Matrix (CSV)", type=["csv"])
 
+    if "active_controls_is_custom" not in st.session_state:
+        st.session_state.active_controls_is_custom = False
+
     if matrix_file is not None:
         df_matrix = pd.read_csv(matrix_file)
+        if df_matrix.shape[1] < 2:
+            st.error("The uploaded CSV must contain at least two columns: control ID and requirement/description.")
+            st.stop()
         st.session_state.active_controls = list(zip(df_matrix.iloc[:, 0], df_matrix.iloc[:, 1]))
+        st.session_state.active_controls_is_custom = True
         st.success(f"Successfully loaded {len(st.session_state.active_controls)} custom controls!")
 
     if st.session_state.active_controls is None:
+        st.session_state.active_controls_is_custom = False
         st.session_state.active_controls = [
             ("A.5.1", "Policies for information security"),
             ("A.8.2", "Privileged access rights"),
@@ -386,7 +394,12 @@ def main():
         with tab2:
             render_gap_analysis_tab(
                 extracted_text=st.session_state.combined_text,
-                model=model
+                model=model,
+                active_controls=(
+                    st.session_state.active_controls
+                    if st.session_state.get("active_controls_is_custom", False)
+                    else None
+                ),
             )
             
             # Add a "Reset Audit" button to clear session state
