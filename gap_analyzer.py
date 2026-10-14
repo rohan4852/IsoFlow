@@ -5,9 +5,8 @@ This module implements batch-processing gap analysis for ISO 27001:2022
 
 Required behaviors for quota avoidance:
 - Each LLM call evaluates exactly N controls in one JSON array response.
-- run_gap_analysis uses ThreadPoolExecutor(max_workers=2) to execute exactly
-  two concurrent batch calls.
-- Each batch is exactly 10 controls; the final remainder (if any) is evaluated
+- Batches are processed sequentially to limit request rate.
+- Each batch contains up to 10 controls; the final remainder (if any) is evaluated
   in a separate batch with N = remainder.
 - The model is forced to return a single valid JSON array containing exactly
   N objects following this internal schema:
@@ -37,7 +36,6 @@ from dataclasses import dataclass
 from typing import Any, List, Optional, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import google.generativeai as genai  # noqa: F401 (used by caller/model configuration)
 
 
 @dataclass(frozen=True)
@@ -50,7 +48,7 @@ class AnalysisResult:
     section: str
     requirement: str
 
-    status: str  # "Compliant" | "Gap Detected"
+    status: str  # "Compliant" | "Gap Detected" | "Analysis Error"
     evidenceCitation: str
     gapComment: str
 
@@ -217,37 +215,50 @@ def _parse_batch_json_array(response_text: str, batch_controls: Sequence[Any]) -
 
 
 def evaluate_batch(model: Any, document_text: str, batch_controls: Sequence[Any]) -> List[AnalysisResult]:
-    """Evaluate a single batch of controls (size N) in one API call."""
-
+    """Evaluate one batch. Retry once if the model returns invalid JSON or schema."""
     max_truncation = 45000
     truncated_text = document_text[:max_truncation]
     if len(document_text) > max_truncation:
         truncated_text += f"\n\n[... document truncated at {max_truncation} characters ...]"
 
-    prompt = _system_prompt() + "\n\n" + _batch_prompt(batch_controls, truncated_text)
+    base_prompt = _system_prompt() + "\n\n" + _batch_prompt(batch_controls, truncated_text)
+    expected_ids = [str(getattr(c, "id")) for c in batch_controls]
+    last_error = None
 
-    response_text = ask_with_backoff(model, prompt, max_retries=3)
-    if not response_text:
-        raise RuntimeError("Empty response from model")
-
-    parsed_items = _parse_batch_json_array(response_text, batch_controls)
-
-    results: List[AnalysisResult] = []
-    for c, item in zip(batch_controls, parsed_items):
-        results.append(
-            AnalysisResult(
-                id=getattr(c, "id"),
-                name=getattr(c, "name"),
-                category=getattr(c, "category"),
-                section=getattr(c, "section"),
-                requirement=getattr(c, "requirement"),
-                status=item["status"],
-                evidenceCitation=item["evidence_citation"],
-                gapComment=item["gap_comment"],
+    for attempt in range(2):
+        prompt = base_prompt
+        if attempt == 1:
+            prompt += (
+                "\n\nYour previous response failed validation: " + str(last_error) + "\n"
+                "Correct the response and return ONLY one valid JSON array. Do not omit controls. "
+                "Return exactly one object per control, in this exact ID order: "
+                + json.dumps(expected_ids, ensure_ascii=False)
+                + ". Use exactly these keys: id, status, evidence_citation, gap_comment."
             )
-        )
+        try:
+            response_text = ask_with_backoff(model, prompt, max_retries=3)
+            if not response_text:
+                raise ValueError("Empty response from model")
+            parsed_items = _parse_batch_json_array(response_text, batch_controls)
+            results: List[AnalysisResult] = []
+            for c, item in zip(batch_controls, parsed_items):
+                results.append(AnalysisResult(
+                    id=str(getattr(c, "id")),
+                    name=str(getattr(c, "name")),
+                    category=str(getattr(c, "category")),
+                    section=str(getattr(c, "section")),
+                    requirement=str(getattr(c, "requirement")),
+                    status=item["status"],
+                    evidenceCitation=item["evidence_citation"],
+                    gapComment=item["gap_comment"],
+                ))
+            return results
+        except Exception as exc:
+            last_error = exc
+            if attempt == 0:
+                continue
 
-    return results
+    raise RuntimeError(f"Batch response invalid after one corrective retry: {last_error}") from last_error
 
 
 def run_gap_analysis(
@@ -276,9 +287,9 @@ def run_gap_analysis(
                 category=getattr(ctrl, "category"),
                 section=getattr(ctrl, "section"),
                 requirement=getattr(ctrl, "requirement"),
-                status="Gap Detected",
+                status="Analysis Error",
                 evidenceCitation="",
-                gapComment="No document text provided for analysis.",
+                gapComment="No document text provided. Upload a readable document and rerun analysis.",
             )
             for ctrl in framework
         ]
@@ -325,9 +336,9 @@ def run_gap_analysis(
                         category=getattr(c, "category"),
                         section=getattr(c, "section"),
                         requirement=getattr(c, "requirement"),
-                        status="Gap Detected",
+                        status="Analysis Error",
                         evidenceCitation="",
-                        gapComment=f"Batch analysis error: {err}. Manual review required.",
+                        gapComment=f"Batch analysis failed after retry: {err}. Manual review required; this is not classified as a compliance gap.",
                     )
 
             # Hard pacing to stay under 10 RPM: 7 seconds between calls.
@@ -345,40 +356,42 @@ def run_gap_analysis(
         + str(sum(1 for r in ordered_results if r.status == "Compliant"))
     )
     print("   Gaps: " + str(sum(1 for r in ordered_results if r.status == "Gap Detected")))
+    print("   Analysis Errors: " + str(sum(1 for r in ordered_results if r.status == "Analysis Error")))
 
     return ordered_results
 
 
 def compute_analysis_summary(results: List[AnalysisResult]) -> dict:
+    """Summarize only completed evaluations in the compliance percentage denominator."""
     total = len(results)
     compliant = sum(1 for r in results if r.status == "Compliant")
     gaps = sum(1 for r in results if r.status == "Gap Detected")
+    errors = sum(1 for r in results if r.status == "Analysis Error")
+    analyzed = compliant + gaps
+    compliance_percentage = (compliant / analyzed * 100) if analyzed else 0.0
 
-    compliance_percentage = (compliant / total * 100) if total > 0 else 0
-
-    by_section: dict[str, dict[str, int]] = {}
-    for r in results:
-        by_section.setdefault(r.section, {"compliant": 0, "gaps": 0})
-        if r.status == "Compliant":
-            by_section[r.section]["compliant"] += 1
-        else:
-            by_section[r.section]["gaps"] += 1
-
-    by_category: dict[str, dict[str, int]] = {}
-    for r in results:
-        by_category.setdefault(r.category, {"compliant": 0, "gaps": 0})
-        if r.status == "Compliant":
-            by_category[r.category]["compliant"] += 1
-        else:
-            by_category[r.category]["gaps"] += 1
+    def grouped_counts(attribute: str) -> dict:
+        grouped: dict[str, dict[str, int]] = {}
+        for result in results:
+            key = str(getattr(result, attribute) or "Uncategorized")
+            grouped.setdefault(key, {"compliant": 0, "gaps": 0, "errors": 0})
+            if result.status == "Compliant":
+                grouped[key]["compliant"] += 1
+            elif result.status == "Gap Detected":
+                grouped[key]["gaps"] += 1
+            elif result.status == "Analysis Error":
+                grouped[key]["errors"] += 1
+        return grouped
 
     return {
         "total_controls": total,
         "compliant_count": compliant,
         "gap_count": gaps,
+        "error_count": errors,
+        "analyzed_count": analyzed,
         "compliance_percentage": round(compliance_percentage, 2),
-        "by_section": by_section,
-        "by_category": by_category,
+        "by_section": grouped_counts("section"),
+        "by_category": grouped_counts("category"),
     }
 
 
@@ -404,4 +417,3 @@ def export_results_to_dict(results: List[AnalysisResult]) -> List[dict]:
         }
         for r in results
     ]
-
