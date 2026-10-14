@@ -219,7 +219,7 @@ def main():
     
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(
-    model_name="models/gemini-2.5-flash-lite",  # Upgraded free tier throughput
+    model_name="models/gemini-3.5-flash-lite",  # Upgraded free tier throughput
     generation_config={"response_mime_type": "application/json"}
 )
     
