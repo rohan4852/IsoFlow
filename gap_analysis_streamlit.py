@@ -17,10 +17,11 @@ This module bridges the gap analysis engine with Streamlit UI components.
 import streamlit as st
 import pandas as pd
 from typing import List, Optional
+from types import SimpleNamespace
 from dataclasses import asdict
 
 
-def render_gap_analysis_tab(extracted_text: str, model):
+def render_gap_analysis_tab(extracted_text: str, model, active_controls=None):
     """
     Main frontend interface for ISO 27001:2022 gap analysis.
     
@@ -42,6 +43,47 @@ def render_gap_analysis_tab(extracted_text: str, model):
     except ImportError as e:
         st.error(f"Failed to import analysis modules: {e}")
         return
+
+    def normalize_custom_controls(controls):
+        """Convert app.py CSV control pairs into the object schema expected by gap_analyzer."""
+        normalized = []
+        seen_ids = set()
+        for index, item in enumerate(controls or [], start=1):
+            if not isinstance(item, (tuple, list)) or len(item) < 2:
+                raise ValueError(f"Custom control row {index} must contain an ID and a description.")
+            control_id = str(item[0]).strip()
+            description = str(item[1]).strip()
+            if not control_id or not description or control_id.lower() == "nan" or description.lower() == "nan":
+                raise ValueError(f"Custom control row {index} has a blank ID or description.")
+            if control_id in seen_ids:
+                raise ValueError(f"Duplicate custom control ID: {control_id}")
+            seen_ids.add(control_id)
+            normalized.append(SimpleNamespace(
+                id=control_id,
+                name=description,
+                category="Custom Matrix",
+                section="Custom Matrix",
+                requirement=description,
+            ))
+        if not normalized:
+            raise ValueError("The custom control matrix is empty. Upload a valid CSV matrix or reset to the default framework.")
+        return normalized
+
+    try:
+        if active_controls is None:
+            selected_framework = list(ISO27001_FRAMEWORK)
+            framework_label = "ISO 27001:2022 framework"
+            framework_signature = tuple(
+                (str(getattr(c, "id", "")), str(getattr(c, "requirement", "")))
+                for c in selected_framework
+            )
+        else:
+            selected_framework = normalize_custom_controls(active_controls)
+            framework_label = "custom control matrix"
+            framework_signature = tuple((c.id, c.requirement) for c in selected_framework)
+    except ValueError as e:
+        st.error(f"Invalid control matrix: {e}")
+        return
     
     # ========================================================================
     # SESSION STATE MANAGEMENT
@@ -54,6 +96,13 @@ def render_gap_analysis_tab(extracted_text: str, model):
     if "gap_analysis_running" not in st.session_state:
         st.session_state.gap_analysis_running = False
     if "gap_filter_status" not in st.session_state:
+        st.session_state.gap_filter_status = "All"
+
+    if st.session_state.get("gap_analysis_framework_signature") != framework_signature:
+        st.session_state.gap_analysis_results = None
+        st.session_state.gap_analysis_summary = None
+        st.session_state.gap_analysis_running = False
+        st.session_state.gap_analysis_framework_signature = framework_signature
         st.session_state.gap_filter_status = "All"
     
     # ========================================================================
@@ -83,13 +132,13 @@ def render_gap_analysis_tab(extracted_text: str, model):
             with st.status("Analyzing document against ISO 27001:2022 framework...", expanded=True) as status:
                 try:
                     st.write(f"Processing {len(extracted_text)} characters of document text...")
-                    st.write(f"Evaluating {len(ISO27001_FRAMEWORK)} controls from framework...")
+                    st.write(f"Evaluating {len(selected_framework)} controls from {framework_label}...")
                     
                     # Execute gap analysis
                     results = run_gap_analysis(
                         combined_text=extracted_text,
                         model=model,
-                        framework=ISO27001_FRAMEWORK
+                        framework=selected_framework
                     )
                     
                     if results:
@@ -131,7 +180,7 @@ def render_gap_analysis_tab(extracted_text: str, model):
         st.subheader("Compliance Summary")
         
         # Create metric cards
-        metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+        metric_col1, metric_col2, metric_col3, metric_col4, metric_col5 = st.columns(5)
         
         with metric_col1:
             st.metric(
@@ -145,7 +194,7 @@ def render_gap_analysis_tab(extracted_text: str, model):
             st.metric(
                 label="Compliance %",
                 value=f"{compliance_pct:.1f}%",
-                delta=f"{compliance_pct - 50:.1f}% vs baseline"
+                help="Calculated only from controls successfully classified as Compliant or Gap Detected."
             )
         
         with metric_col3:
@@ -160,6 +209,13 @@ def render_gap_analysis_tab(extracted_text: str, model):
                 label="Gaps Detected",
                 value=summary["gap_count"],
                 delta=None
+            )
+
+        with metric_col5:
+            st.metric(
+                label="Analysis Errors",
+                value=summary.get("error_count", 0),
+                help="Controls that could not be reliably evaluated. These are not counted as compliance gaps."
             )
         
         # --- BREAKDOWN BY CATEGORY ---
@@ -179,6 +235,7 @@ def render_gap_analysis_tab(extracted_text: str, model):
                     "Type": category,
                     "Compliant": stats["compliant"],
                     "Gaps": stats["gaps"],
+                    "Analysis Errors": stats.get("errors", 0),
                     "Compliance %": f"{compliance:.1f}%"
                 })
             st.dataframe(pd.DataFrame(category_data), use_container_width=True, hide_index=True)
@@ -194,6 +251,7 @@ def render_gap_analysis_tab(extracted_text: str, model):
                     "Section": section[:25],
                     "Compliant": stats["compliant"],
                     "Gaps": stats["gaps"],
+                    "Analysis Errors": stats.get("errors", 0),
                     "Compliance %": f"{compliance:.1f}%"
                 })
             st.dataframe(pd.DataFrame(section_data), use_container_width=True, hide_index=True)
@@ -202,7 +260,7 @@ def render_gap_analysis_tab(extracted_text: str, model):
         st.divider()
         st.subheader("Detailed Results")
         
-        filter_cols = st.columns(4)
+        filter_cols = st.columns(5)
         
         with filter_cols[0]:
             if st.button("All Controls", use_container_width=True):
@@ -220,6 +278,11 @@ def render_gap_analysis_tab(extracted_text: str, model):
                 st.rerun()
         
         with filter_cols[3]:
+            if st.button("Errors Only", use_container_width=True):
+                st.session_state.gap_filter_status = "Analysis Error"
+                st.rerun()
+
+        with filter_cols[4]:
             if st.button("Reset Filter", use_container_width=True):
                 st.session_state.gap_filter_status = "All"
                 st.rerun()
@@ -232,14 +295,18 @@ def render_gap_analysis_tab(extracted_text: str, model):
             filtered_results = [r for r in results if r.status == "Compliant"]
         elif current_filter == "Gap Detected":
             filtered_results = [r for r in results if r.status == "Gap Detected"]
+        elif current_filter == "Analysis Error":
+            filtered_results = [r for r in results if r.status == "Analysis Error"]
         
         # Display filter status
         if current_filter == "All":
             filter_label = f"Showing all {len(filtered_results)} controls"
         elif current_filter == "Compliant":
             filter_label = f"Showing {len(filtered_results)} compliant controls"
-        else:
+        elif current_filter == "Gap Detected":
             filter_label = f"Showing {len(filtered_results)} controls with gaps"
+        else:
+            filter_label = f"Showing {len(filtered_results)} controls with analysis errors"
         
         st.info(filter_label)
         
@@ -254,11 +321,16 @@ def render_gap_analysis_tab(extracted_text: str, model):
                 evidence_content = result.evidenceCitation
                 evidence_label = "Evidence Found:"
                 content_type = "compliant"
-            else:
+            elif result.status == "Gap Detected":
                 status_icon = "⚠️"
                 evidence_content = result.gapComment
                 evidence_label = "Gap Analysis:"
                 content_type = "gap"
+            else:
+                status_icon = "🛠️"
+                evidence_content = result.gapComment
+                evidence_label = "Analysis Error — Manual Review Required:"
+                content_type = "error"
             
             # Create table row with columns: Control ID, Name, Status, Evidence/Gap
             col_id, col_name, col_status, col_evidence = st.columns([1, 2, 1.5, 3])
@@ -296,7 +368,8 @@ def render_gap_analysis_tab(extracted_text: str, model):
                 "Requirement": result.requirement,
                 "Status": result.status,
                 "Evidence Citation": result.evidenceCitation,
-                "Gap Analysis / Remediation": result.gapComment,
+                "Gap Analysis / Remediation": result.gapComment if result.status == "Gap Detected" else "",
+                "Analysis Error / Manual Review": result.gapComment if result.status == "Analysis Error" else "",
             })
         
         df_export = pd.DataFrame(csv_data)
@@ -322,7 +395,7 @@ def render_gap_analysis_tab(extracted_text: str, model):
             st.rerun()
 
 
-def create_gap_analysis_integration(extracted_text: str, model):
+def create_gap_analysis_integration(extracted_text: str, model, active_controls=None):
     """
     Wrapper function for integrating gap analysis tab into main Streamlit app.
     
@@ -340,7 +413,7 @@ def create_gap_analysis_integration(extracted_text: str, model):
                 model
             )
     """
-    render_gap_analysis_tab(extracted_text, model)
+    render_gap_analysis_tab(extracted_text, model, active_controls=active_controls)
 
 
 def export_results_to_csv(results: List, current_filter: str = "All") -> str:
@@ -367,7 +440,8 @@ def export_results_to_csv(results: List, current_filter: str = "All") -> str:
                 "Requirement": result.requirement,
                 "Status": result.status,
                 "Evidence Citation": result.evidenceCitation,
-                "Gap Analysis / Remediation": result.gapComment,
+                "Gap Analysis / Remediation": result.gapComment if result.status == "Gap Detected" else "",
+                "Analysis Error / Manual Review": result.gapComment if result.status == "Analysis Error" else "",
             })
         
         df = pd.DataFrame(csv_data)
