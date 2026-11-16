@@ -1,189 +1,245 @@
-import io, json, re, gc, time, random, concurrent.futures
-from dataclasses import asdict, dataclass
+"""IsoFlow — AI-assisted compliance evidence mapping (Streamlit).
+
+Evidence-classification-v2: the main audit pipeline now uses the unified
+seven-status model (Compliant, Partially Compliant, Non-Compliant,
+Not Found, Conflicting Evidence, Needs Review, Analysis Error) with
+page-aware source traceability and deterministic quotation verification.
+
+What this app does and does not do
+-----------------------------------
+* It maps documents to controls and surfaces evidence for a human
+  reviewer.  Results are AI-assisted findings, NOT certified compliance
+  determinations and NOT an audit opinion.
+* Quotations are verified deterministically against the extracted source
+  pages; unverified quotations are dropped, never repaired.
+* Exports (CSV / Excel) are generated in memory; no report files are
+  written to the server filesystem.
+"""
+
+import os
+from typing import List, Sequence, Tuple
+
 import pandas as pd
 import streamlit as st
-from pypdf import PdfReader
+
 import google.generativeai as genai
-from google.api_core import exceptions
-from excel_formatter import generate_excel_bytes
+from audit_engine import analyse_controls
+from evidence_model import (
+    EvidenceResult,
+    EvidenceStatus,
+    PageText,
+)
+from excel_formatter import generate_csv_bytes, generate_excel_bytes
 from gap_analysis_streamlit import render_gap_analysis_tab
-import os
+from pdf_extraction import extract_pdf_pages
 
-@dataclass
-class AuditRow:
-    filename: str
-    control_id: str
-    audit_finding: str
-    evidence: str
+# Backwards-compatible name: the old AuditRow is superseded by
+# EvidenceResult.  Kept as an alias so older imports do not break.
+AuditRow = EvidenceResult
 
-def _clean_text(text: str) -> str:
-    text = text.replace("\x00", " ")
-    text = re.sub(r"[\t\r ]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
-
-def extract_pdf_text(pdf_bytes) -> str:
-    extracted = ""
-    try:
-        reader = PdfReader(io.BytesIO(pdf_bytes))
-        pages = [p.extract_text() or "" for p in reader.pages]
-        extracted = "\n\n".join(pages).strip()
-    except Exception as e:
-        return ""
-    return _clean_text(extracted)
 
 def get_working_model_name(api_key):
     genai.configure(api_key=api_key)
     try:
         for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
+            if "generateContent" in m.supported_generation_methods:
                 name = m.name
-                if 'flash' in name.lower(): return name
-                if 'gemini-1.5-pro' in name.lower(): return name
-                if 'gemini-pro' in name.lower(): return name
+                if "flash" in name.lower():
+                    return name
+                if "gemini-1.5-pro" in name.lower():
+                    return name
+                if "gemini-pro" in name.lower():
+                    return name
         return "models/gemini-pro"
-    except:
-        return "models/gemini-pro"
-
-# --- SMART RETRY LOGIC ---
-def ask_with_backoff(model, prompt, retries=3):
-    """
-    If the API blocks us, we wait and try again.
-    """
-    for i in range(retries):
-        try:
-            return model.generate_content(
-                prompt,
-                generation_config={"response_mime_type": "application/json", "temperature": 0.0},
-            )
-        except Exception as e:
-            if "429" in str(e) or "ResourceExhausted" in str(e) or "Too Many Requests" in str(e):
-                wait_time = (i + 1) * 5
-                time.sleep(wait_time)
-                continue
-            raise e
-    raise Exception("Timed out")
-
-
-def _strip_json_text(text: str) -> str:
-    if not isinstance(text, str):
-        return ""
-    s = text.strip()
-    if s.startswith("```json"):
-        s = s[len("```json") :].strip()
-    elif s.startswith("```"):
-        s = s[len("```") :].strip()
-    if s.endswith("```"):
-        s = s[: -len("```")].strip()
-
-    start = s.find("{")
-    end = s.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        s = s[start : end + 1]
-    return s.strip()
-
-
-def _parse_audit_response(text: str) -> dict:
-    cleaned = _strip_json_text(text)
-    if not cleaned:
-        raise ValueError("Empty response")
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        finding_match = re.search(r"finding\s*[:=]\s*[\"']?([A-Za-z ]+?)[\"']?(?:\s|,|$)", cleaned, re.I)
-        evidence_match = re.search(
-            r"evidence\s*[:=]\s*(?:\"(?P<quote>.*)\"|\'(?P<single>.*)\'|(?P<plain>.*))$",
-            cleaned,
-            re.I | re.S,
-        )
-        if not finding_match:
-            raise ValueError("Unable to parse JSON response")
-        evidence = evidence_match.group("quote") or evidence_match.group("single") or evidence_match.group("plain") or ""
-        return {
-            "finding": finding_match.group(1).strip(),
-            "evidence": evidence.strip() if isinstance(evidence, str) else "",
-        }
-
-
-def ask_single_control(model, document_text, cid, cdesc, file_name) -> AuditRow:
-    truncated_text = document_text[:120000]
-    
-    prompt = f"""
-    You are a strict ISO 27001 Auditor.
-    Task: Search the document text below for exact verbatim evidence of Control {cid} ({cdesc}).
-
-    Output rules:
-    1) Return ONLY valid JSON, no markdown, no backticks, no extra text.
-    2) If evidence is found, return: {{"finding": "Compliant", "evidence": "Exact quote..."}}
-    3) If evidence is not found, return: {{"finding": "Not Found", "evidence": "No evidence found"}}
-    4) Do not hallucinate. Use ONLY text from the document.
-
-    Document text:
-    {truncated_text}
-    """
-    try:
-        resp = ask_with_backoff(model, prompt)
-        text_resp = getattr(resp, "text", "")
-        parsed = _parse_audit_response(text_resp)
-        return AuditRow(
-            filename=file_name,
-            control_id=cid,
-            audit_finding=parsed.get("finding", "Manual Review"),
-            evidence=parsed.get("evidence", "No evidence found"),
-        )
     except Exception:
-        return AuditRow(filename=file_name, control_id=cid, audit_finding="Error", evidence="Processing Failed")
+        return "models/gemini-pro"
 
 
-def process_audit(files_data, active_controls, model):
+def process_audit(
+    pages_by_document: Sequence[Tuple[str, Sequence[PageText]]],
+    active_controls: Sequence[Tuple[str, str, str]],
+    model,
+) -> List[EvidenceResult]:
+    """Run the two-stage audit across every document and control.
+
+    ``pages_by_document`` is a list of ``(filename, pages)`` pairs.
+    ``active_controls`` is a list of ``(control_id, name, requirement)``
+    tuples.  Returns validated, adjudicated results in stable order.
     """
-    Helper function to run the multi-threaded extraction logic.
-    files_data is a list of tuples: (filename, document_text)
-    """
-    all_rows = []
-    total_steps = len(files_data) * len(active_controls)
     current_step = 0
-    
+
     status = st.status("🚀 Initializing Full Audit...", expanded=True)
     progress_bar = st.progress(0)
-    
-    for filename, doc_text in files_data:
+
+    def _progress(control_id: str, done: int, total: int) -> None:
+        nonlocal current_step
+        current_step = done
+        status.write(f"⚡ Extracted evidence for **{control_id}**")
+        progress_bar.progress(min(done / max(total, 1), 1.0))
+
+    for filename, _ in pages_by_document:
         status.write(f"Reading **{filename}**...")
-        
-        if not doc_text:
-            status.error(f"Could not read text from {filename}")
-            continue
-            
-        # The Engine Upgrade: Asynchronous Parallel Processing
-        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
-            # 1. Submit all controls to be mapped at the exact same time
-            future_to_control = {
-                executor.submit(ask_single_control, model, doc_text, cid, desc, filename): cid 
-                for cid, desc in active_controls
-            }
-            
-            # 2. Catch them as they finish and update the UI instantly
-            for future in concurrent.futures.as_completed(future_to_control):
-                cid = future_to_control[future]
-                res = future.result()
-                all_rows.append(res)
-                
-                status.write(f"⚡ Extracted evidence for **{cid}**")
-                
-                current_step += 1
-                safe_progress = min(current_step / total_steps, 1.0)
-                progress_bar.progress(safe_progress)
+
+    all_rows = analyse_controls(
+        model,
+        pages_by_document,
+        active_controls,
+        max_workers=5,
+        progress=_progress,
+    )
 
     status.update(label="✅ Audit Complete!", state="complete", expanded=False)
     progress_bar.empty()
     return all_rows
+
+
+def _load_controls_from_csv(df: pd.DataFrame) -> List[Tuple[str, str, str]]:
+    """Load a custom control matrix CSV.
+
+    The first column is the control ID and the second is the requirement /
+    description.  An optional third column may carry the requirement kind
+    ("operational" or "documentary"); it is validated but not required.
+    """
+    if df.shape[1] < 2:
+        raise ValueError(
+            "The uploaded CSV must contain at least two columns: "
+            "control ID and requirement/description."
+        )
+    controls: List[Tuple[str, str, str]] = []
+    seen = set()
+    for _, row in df.iterrows():
+        cid = str(row.iloc[0]).strip()
+        desc = str(row.iloc[1]).strip()
+        if not cid or not desc or cid.lower() == "nan" or desc.lower() == "nan":
+            raise ValueError("Control matrix rows must have a non-empty ID and description.")
+        if cid in seen:
+            raise ValueError(f"Duplicate control ID in matrix: {cid}")
+        seen.add(cid)
+        controls.append((cid, desc, desc))
+    if not controls:
+        raise ValueError("The control matrix is empty.")
+    return controls
+
+
+def _default_controls() -> List[Tuple[str, str, str]]:
+    return [
+        ("A.5.1", "Policies for information security", "Policies for information security"),
+        ("A.8.2", "Privileged access rights", "Privileged access rights"),
+        ("A.9.1", "Access control policy", "Access control policy"),
+        ("A.10.1", "Cryptography policy", "Cryptography policy"),
+        ("A.12.1", "Documented operating procedures", "Documented operating procedures"),
+        ("A.13.1", "Network security management", "Network security management"),
+    ]
+
+
+def render_audit_results(results: List[EvidenceResult]) -> None:
+    """Structured results view: status, coverage, evidence, review state.
+
+    AI-generated findings, source evidence and human reviewer decisions
+    are shown separately and labelled as such.
+    """
+    st.subheader("📋 Audit Findings")
+    st.caption(
+        "AI-assisted findings for human review. These results are not a "
+        "certified compliance determination and not an audit opinion."
+    )
+
+    # --- Summary metrics ---
+    counts = {status.value: 0 for status in EvidenceStatus}
+    for r in results:
+        counts[r.status.value] += 1
+    cols = st.columns(len(counts))
+    for col, status in zip(cols, EvidenceStatus):
+        col.metric(status.value, counts[status.value])
+    review_needed = sum(1 for r in results if r.review_required)
+    st.info(f"🔎 {review_needed} of {len(results)} results need human review.")
+
+    # --- Per-control expandable detail ---
+    for result in results:
+        icon = {
+            EvidenceStatus.COMPLIANT.value: "✅",
+            EvidenceStatus.PARTIALLY_COMPLIANT.value: "🟡",
+            EvidenceStatus.NON_COMPLIANT.value: "❌",
+            EvidenceStatus.NOT_FOUND.value: "🔍",
+            EvidenceStatus.CONFLICTING_EVIDENCE.value: "⚠️",
+            EvidenceStatus.NEEDS_REVIEW.value: "👀",
+            EvidenceStatus.ANALYSIS_ERROR.value: "🛠️",
+        }.get(result.status.value, "•")
+        header = (
+            f"{icon} {result.control_id} — {result.control_name or result.control_id} "
+            f"· {result.status.value}"
+        )
+        with st.expander(header, expanded=False):
+            st.markdown(f"**Status (AI):** {result.status.value}")
+            st.markdown(f"**Requirement coverage:** {result.requirement_coverage.value}")
+            st.markdown(f"**Requirement:** {result.requirement or '—'}")
+            st.markdown("**AI reasoning:**")
+            st.write(result.reasoning or "—")
+
+            st.markdown("**Source evidence (verified quotations):**")
+            if result.evidence:
+                for passage in result.evidence:
+                    st.markdown(
+                        f"> “{passage.quote}”\n\n"
+                        f"> — {passage.source_document}, page {passage.page} "
+                        f"({passage.evidence_type.value})"
+                    )
+            else:
+                st.write("No verified evidence passage.")
+
+            if result.covered_scope:
+                st.markdown("**Covered scope:** " + "; ".join(result.covered_scope))
+            if result.uncovered_scope:
+                st.markdown("**Uncovered scope:** " + "; ".join(result.uncovered_scope))
+            if result.missing_elements:
+                st.markdown("**Missing elements:**")
+                for item in result.missing_elements:
+                    st.markdown(f"- {item}")
+            if result.conflicts:
+                st.markdown("**Conflicts:**")
+                for item in result.conflicts:
+                    st.markdown(f"- {item}")
+            if result.exceptions:
+                st.markdown("**Exceptions:**")
+                for item in result.exceptions:
+                    st.markdown(f"- {item}")
+            if result.analysis_error:
+                st.error(f"**Analysis error:** {result.analysis_error}")
+            if result.review_required:
+                st.warning("⚠️ Human review required for this result.")
+
+            # --- Human reviewer decision (clearly separated from AI output) ---
+            st.divider()
+            st.markdown("**Human reviewer decision** (not an AI result)")
+            key_prefix = f"review-{result.filename}-{result.control_id}"
+            decision = st.selectbox(
+                "Reviewer decision",
+                options=["", *EvidenceStatus.values()],
+                index=0,
+                key=f"{key_prefix}-decision",
+                help="A human reviewer may confirm or override the AI status.",
+            )
+            comments = st.text_area(
+                "Reviewer comments",
+                key=f"{key_prefix}-comments",
+                help="Record the basis for the reviewer decision.",
+            )
+            if st.button("Save reviewer decision", key=f"{key_prefix}-save"):
+                if decision:
+                    result.reviewer_decision = decision
+                    result.reviewer_comments = comments or None
+                    result.review_required = False
+                    st.success(f"Reviewer decision saved: {decision}")
+                else:
+                    st.warning("Choose a decision before saving.")
+
 
 def main():
     st.set_page_config(page_title="IsoFlow", layout="wide")
     st.markdown("<style>header {visibility: hidden;} footer {visibility: hidden;}</style>", unsafe_allow_html=True)
 
     # --- INITIALIZE SESSION STATE ---
-    if "auth" not in st.session_state: 
+    if "auth" not in st.session_state:
         st.session_state.auth = False
     if "audit_completed" not in st.session_state:
         st.session_state.audit_completed = False
@@ -191,11 +247,13 @@ def main():
         st.session_state.all_rows = []
     if "combined_text" not in st.session_state:
         st.session_state.combined_text = ""
-    
+    if "all_pages" not in st.session_state:
+        st.session_state.all_pages = []
+
     try:
         stored_key = st.secrets.get("ACCESS_KEY", "")
         api_key = st.secrets.get("GEMINI_API_KEY", "")
-    except:
+    except Exception:
         st.error("Missing Secrets")
         return
 
@@ -211,72 +269,60 @@ def main():
         st.session_state.model_name = get_working_model_name(api_key)
     if "active_controls" not in st.session_state:
         st.session_state.active_controls = None
-    
-    current_model = st.session_state.model_name
 
     st.title("IsoFlow — Automated Auditor")
-    st.caption("🟢 System Status: Online | Environment: Isolated RAM Compute (Zero-Retention)")
-    
+    st.caption(
+        "AI-assisted evidence mapping for human review. Results are not "
+        "certified compliance determinations."
+    )
+
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(
-    model_name="models/gemini-3.5-flash-lite",  # Upgraded free tier throughput
-    generation_config={"response_mime_type": "application/json"}
-)
-    
+        model_name="models/gemini-3.5-flash-lite",
+        generation_config={"response_mime_type": "application/json"},
+    )
+
     # --- 1-CLICK DEMO SECTION ---
     st.info("Don't have your client files handy? See the engine in action.")
 
     if st.button("🚀 Run Sample SOC 2 Mapping (1-Click Demo)"):
         with st.spinner("Processing sample PDF and Control Matrix..."):
-            
             dummy_pdf_path = "dummy_policy.pdf"
             dummy_csv_path = "dummy_controls.csv"
-            
+
             if not os.path.exists(dummy_pdf_path) or not os.path.exists(dummy_csv_path):
                 st.error("Missing demo files on server! Please upload 'dummy_policy.pdf' and 'dummy_controls.csv' to the repo.")
             else:
                 try:
-                    # 1. Read the local dummy PDF
                     with open(dummy_pdf_path, "rb") as f:
                         dummy_pdf_bytes = f.read()
-                    doc_text = extract_pdf_text(dummy_pdf_bytes)
-                    
-                    # 2. Read the local dummy CSV
+                    doc = extract_pdf_pages(dummy_pdf_bytes, "dummy_policy.pdf")
+                    if doc.warnings:
+                        for warning in doc.warnings:
+                            st.warning(warning)
                     df_dummy = pd.read_csv(dummy_csv_path)
-                    dummy_controls = list(zip(df_dummy.iloc[:, 0], df_dummy.iloc[:, 1]))
-                    
-                    # 3. Process using the shared helper function
-                    files_data = [("dummy_policy.pdf", doc_text)]
-                    all_rows = process_audit(files_data, dummy_controls, model)
-                    
+                    dummy_controls = _load_controls_from_csv(df_dummy)
+                    all_rows = process_audit(
+                        [("dummy_policy.pdf", doc.pages)], dummy_controls, model
+                    )
                     if all_rows:
-                        df = pd.DataFrame([asdict(r) for r in all_rows])
-                        st.subheader("📋 Audit Findings (Demo Data)")
-                        st.dataframe(
-                            df, 
-                            column_config={
-                                "control_id": st.column_config.TextColumn("ID", width="small"),
-                                "audit_finding": st.column_config.TextColumn("Status", width="small"),
-                                "evidence": st.column_config.TextColumn("Verbatim Evidence", width="large"),
-                                "filename": st.column_config.TextColumn("File", width="medium"),
-                            },
-                            use_container_width=True,
-                            hide_index=True
-                        )
-                        
-                        df.to_csv('demo_report.csv', index=False)
-                        
-                        try:
-                            excel_data = generate_excel_bytes('demo_report.csv')
+                        render_audit_results(all_rows)
+                        st.success("✅ Analysis Complete!")
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.download_button(
+                                "📥 Download Raw Data (CSV)",
+                                generate_csv_bytes(all_rows),
+                                "demo_report.csv",
+                                "text/csv",
+                            )
+                        with col2:
                             st.download_button(
                                 label="📊 Download Enterprise Excel Report (Demo)",
-                                data=excel_data,
+                                data=generate_excel_bytes(all_rows),
                                 file_name="Sample_SOC2_Mapping.xlsx",
-                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                             )
-                        except Exception as excel_err:
-                            st.warning(f"Could not format Excel (check formatting script): {excel_err}")
-                            
                 except Exception as e:
                     st.error(f"Engine error: {e}")
 
@@ -290,107 +336,87 @@ def main():
         st.session_state.active_controls_is_custom = False
 
     if matrix_file is not None:
-        df_matrix = pd.read_csv(matrix_file)
-        if df_matrix.shape[1] < 2:
-            st.error("The uploaded CSV must contain at least two columns: control ID and requirement/description.")
+        try:
+            df_matrix = pd.read_csv(matrix_file)
+            st.session_state.active_controls = _load_controls_from_csv(df_matrix)
+            st.session_state.active_controls_is_custom = True
+            st.success(f"Successfully loaded {len(st.session_state.active_controls)} custom controls!")
+        except ValueError as e:
+            st.error(f"Invalid control matrix: {e}")
             st.stop()
-        st.session_state.active_controls = list(zip(df_matrix.iloc[:, 0], df_matrix.iloc[:, 1]))
-        st.session_state.active_controls_is_custom = True
-        st.success(f"Successfully loaded {len(st.session_state.active_controls)} custom controls!")
 
     if st.session_state.active_controls is None:
         st.session_state.active_controls_is_custom = False
-        st.session_state.active_controls = [
-            ("A.5.1", "Policies for information security"),
-            ("A.8.2", "Privileged access rights"),
-            ("A.9.1", "Access control policy"),
-            ("A.10.1", "Cryptography policy"), 
-            ("A.12.1", "Documented operating procedures"),
-            ("A.13.1", "Network security management"),
-        ]
+        st.session_state.active_controls = _default_controls()
 
     active_controls = st.session_state.active_controls
 
     # --- UI: UPLOAD PDF ---
     st.subheader("2. Upload Policy Document")
     files = st.file_uploader("Upload Evidence (PDF)", type=["pdf"], accept_multiple_files=True)
-    
+
     # --- BUTTON CLICK: EXECUTE AUDIT AND SAVE TO SESSION STATE ---
     if st.button("Run Full Audit", type="primary", disabled=not files):
-        
-        # Prepare data for processing
-        files_data = []
+        pages_by_document = []
+        combined_parts = []
         for f in files:
-            doc_text = extract_pdf_text(f.getvalue())
-            files_data.append((f.name, doc_text))
-        
-        # Process using the shared helper function
-        all_rows = process_audit(files_data, active_controls, model)
-        
-        # Save results to session state
-        if all_rows:
-            st.session_state.all_rows = all_rows
-            
-            # Combine all document text for gap analysis
-            combined_text = "\n\n".join([doc_text for _, doc_text in files_data])
-            st.session_state.combined_text = combined_text
-            
-            # Mark audit as completed
-            st.session_state.audit_completed = True
-            
-            # Trigger rerun to display persistent UI
-            st.rerun()
-    
+            doc = extract_pdf_pages(f.getvalue(), f.name)
+            if doc.warnings:
+                for warning in doc.warnings:
+                    st.warning(f"{f.name}: {warning}")
+            if doc.extraction_error:
+                st.error(f"Could not read text from {f.name}: {doc.extraction_error}")
+                continue
+            pages_by_document.append((f.name, doc.pages))
+            combined_parts.append(doc.text)
+
+        if not pages_by_document:
+            st.error("No readable PDF text was extracted. Check the files and try again.")
+        else:
+            all_rows = process_audit(pages_by_document, active_controls, model)
+            if all_rows:
+                st.session_state.all_rows = all_rows
+                st.session_state.combined_text = "\n\n".join(combined_parts)
+                st.session_state.all_pages = [
+                    page for _, pages in pages_by_document for page in pages
+                ]
+                st.session_state.audit_completed = True
+                st.rerun()
+
     # --- PERSISTENT TAB RENDERING (SEPARATE TOP-LEVEL CHECK) ---
     if st.session_state.audit_completed:
-        
-        # Convert all_rows to DataFrame for display
-        df = pd.DataFrame([asdict(r) for r in st.session_state.all_rows])
-        
-        # Create tabs
         tab1, tab2 = st.tabs(["📋 Audit Findings", "🔍 Gap Analysis"])
-        
+
         with tab1:
-            st.subheader("📋 Audit Findings")
-            st.dataframe(
-                df, 
-                column_config={
-                    "control_id": st.column_config.TextColumn("ID", width="small"),
-                    "audit_finding": st.column_config.TextColumn("Status", width="small"),
-                    "evidence": st.column_config.TextColumn("Verbatim Evidence", width="large"),
-                    "filename": st.column_config.TextColumn("File", width="medium"),
-                },
-                use_container_width=True,
-                hide_index=True
-            )
-            
-            # Save the raw CSV for the formatter to use
-            df.to_csv('report.csv', index=False)
-            csv = df.to_csv(index=False).encode('utf-8')
-            
+            render_audit_results(st.session_state.all_rows)
+
             st.success("✅ Analysis Complete!")
-            
+
             col1, col2 = st.columns(2)
-            
             with col1:
-                st.download_button("📥 Download Raw Data (CSV)", csv, "report.csv", "text/csv")
-            
+                st.download_button(
+                    "📥 Download Raw Data (CSV)",
+                    generate_csv_bytes(st.session_state.all_rows),
+                    "report.csv",
+                    "text/csv",
+                )
             with col2:
                 try:
-                    # Generate the beautiful Excel file in memory
-                    excel_data = generate_excel_bytes('report.csv')
                     st.download_button(
                         label="📊 Download Enterprise Excel Report",
-                        data=excel_data,
+                        data=generate_excel_bytes(st.session_state.all_rows),
                         file_name="IsoFlow_Audit_Report.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     )
                 except Exception as excel_err:
                     st.error(f"Excel formatting failed. Check excel_formatter.py. Error: {excel_err}")
-            
-            # Upsell to the paid version
-            st.warning("🔒 Want to upload your own custom PDFs and run them on secure AWS servers? Purchase the Pro license.")
-        
+
+            st.info(
+                "Results are AI-assisted findings for human review. They are "
+                "not a certification, an audit opinion, or a guarantee of "
+                "audit outcomes."
+            )
+
         with tab2:
             render_gap_analysis_tab(
                 extracted_text=st.session_state.combined_text,
@@ -400,15 +426,17 @@ def main():
                     if st.session_state.get("active_controls_is_custom", False)
                     else None
                 ),
+                pages=st.session_state.get("all_pages") or None,
             )
-            
-            # Add a "Reset Audit" button to clear session state
+
             st.divider()
             if st.button("🔄 Reset & Start New Audit"):
                 st.session_state.audit_completed = False
                 st.session_state.all_rows = []
                 st.session_state.combined_text = ""
+                st.session_state.all_pages = []
                 st.rerun()
+
 
 if __name__ == "__main__":
     main()
